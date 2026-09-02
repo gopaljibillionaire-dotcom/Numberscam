@@ -18,6 +18,7 @@ from aiogram.types import (
     InlineKeyboardMarkup,
     InlineKeyboardButton,
     FSInputFile,
+    BufferedInputFile,
 )
 
 from config import (
@@ -144,10 +145,10 @@ def get_main_keyboard(user_id: int, lang: str = "ru") -> InlineKeyboardMarkup:
     t = TEXTS.get(lang, TEXTS["ru"])
     buttons = [
         [
-            InlineKeyboardButton(text=t["btn_buy_account"], callback_data="buy_cat:account:1", style="primary")
+            InlineKeyboardButton(text=t["btn_buy_account"], callback_data="buy_cat:account:1")
         ],
         [
-            InlineKeyboardButton(text=t["btn_topup"], callback_data="wallet_topup", style="success")
+            InlineKeyboardButton(text=t["btn_topup"], callback_data="wallet_topup")
         ],
         [
             InlineKeyboardButton(text=t["btn_orders"], callback_data="my_orders"),
@@ -162,14 +163,14 @@ def get_main_keyboard(user_id: int, lang: str = "ru") -> InlineKeyboardMarkup:
         ]
     ]
     if user_id in ADMIN_IDS:
-        buttons.append([InlineKeyboardButton(text=t["btn_admin"], callback_data="admin_panel", style="danger")])
+        buttons.append([InlineKeyboardButton(text=t["btn_admin"], callback_data="admin_panel")])
     return InlineKeyboardMarkup(inline_keyboard=buttons)
 
 def back_home_buttons(lang: str = "ru") -> List[List[InlineKeyboardButton]]:
     t = TEXTS.get(lang, TEXTS["ru"])
     return [
         [InlineKeyboardButton(text=t["btn_support"], url=DEVELOPER_SUPPORT_LINK)],
-        [InlineKeyboardButton(text=t["btn_home"], callback_data="main_menu", style="primary")]
+        [InlineKeyboardButton(text=t["btn_home"], callback_data="main_menu")]
     ]
 
 router = Router()
@@ -199,8 +200,8 @@ async def cmd_start(message: Message):
     if user.get('language') is None:
         kb = InlineKeyboardMarkup(inline_keyboard=[
             [
-                InlineKeyboardButton(text="🇷🇺 Русский", callback_data="first_lang:ru", style="success"),
-                InlineKeyboardButton(text="🇬🇧 English", callback_data="first_lang:en", style="primary")
+                InlineKeyboardButton(text="🇷🇺 Русский", callback_data="first_lang:ru"),
+                InlineKeyboardButton(text="🇬🇧 English", callback_data="first_lang:en")
             ]
         ])
         await message.answer(TEXTS["ru"]["first_time_prompt"], reply_markup=kb, parse_mode="HTML")
@@ -226,14 +227,67 @@ async def cmd_export_db(message: Message):
         await message.answer("❌ Database file not found.")
 
 @router.message(F.document, F.from_user.id.in_(ADMIN_IDS))
-async def process_import_db(message: Message):
-    if not message.document.file_name.endswith(".db"):
-        return
+async def process_admin_document_import(message: Message, state: FSMContext):
+    file_name = message.document.file_name.lower()
     
-    file_id = message.document.file_id
-    file_info = await message.bot.get_file(file_id)
-    await message.bot.download_file(file_info.file_path, DATABASE_NAME)
-    await message.answer("✅ <b>Database file imported successfully!</b>", parse_mode="HTML")
+    # Handle Database File Import (.db)
+    if file_name.endswith(".db"):
+        file_id = message.document.file_id
+        file_info = await message.bot.get_file(file_id)
+        await message.bot.download_file(file_info.file_path, DATABASE_NAME)
+        await message.answer("✅ <b>Database file imported successfully!</b>", parse_mode="HTML")
+        return
+
+    # Handle Stock Text File Import (.txt)
+    current_state = await state.get_state()
+    if file_name.endswith(".txt") and current_state == AddProductFSM.enter_content.state:
+        file_id = message.document.file_id
+        file_info = await message.bot.get_file(file_id)
+        downloaded = await message.bot.download_file(file_info.file_path)
+        raw_content = downloaded.read().decode("utf-8", errors="ignore")
+        
+        lines = [line.strip() for line in raw_content.split("\n") if line.strip()]
+        if not lines:
+            await message.answer("❌ The uploaded .txt file is empty or contains invalid content.")
+            return
+
+        data = await state.get_data()
+        admin_id = message.from_user.id
+        added_count = 0
+
+        async with get_db() as db:
+            for item in lines:
+                prod_id = item.upper()
+                try:
+                    await db.execute("""
+                        INSERT INTO products (product_id, seller_id, type, country_id, price, quality, bin_link, status)
+                        VALUES (?, ?, 'account', ?, ?, ?, '', 'available')
+                        ON CONFLICT(product_id) DO UPDATE SET
+                            seller_id=excluded.seller_id,
+                            price=excluded.price,
+                            quality=excluded.quality,
+                            status='available'
+                    """, (prod_id, admin_id, data['country_id'], data['price'], data['quality']))
+                    added_count += 1
+                except Exception as e:
+                    logger.error(f"Failed to add item '{item}': {e}")
+
+            await db.commit()
+
+        current_total = data.get('uploaded_total', 0) + added_count
+        await state.update_data(uploaded_total=current_total)
+
+        exit_kb = InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text="🛑 Finish / Exit Upload Mode", callback_data="exit_upload")]
+        ])
+
+        await message.answer(
+            f"✅ <b>TXT FILE IMPORTED! (+{added_count} Accounts)</b>\n"
+            f"📊 <b>Total Uploaded in this Session:</b> <code>{current_total}</code>\n\n"
+            f"📥 <i>Send more text files or raw lines to continue, or tap Finish below.</i>",
+            reply_markup=exit_kb,
+            parse_mode="HTML"
+        )
 
 @router.callback_query(F.data.startswith("first_lang:"))
 async def cb_first_lang_selection(callback: CallbackQuery):
@@ -257,10 +311,10 @@ async def cb_first_lang_selection(callback: CallbackQuery):
 async def cb_switch_language_menu(callback: CallbackQuery):
     kb = InlineKeyboardMarkup(inline_keyboard=[
         [
-            InlineKeyboardButton(text="🇷🇺 Русский", callback_data="set_lang:ru", style="success"),
-            InlineKeyboardButton(text="🇬🇧 English", callback_data="set_lang:en", style="primary")
+            InlineKeyboardButton(text="🇷🇺 Русский", callback_data="set_lang:ru"),
+            InlineKeyboardButton(text="🇬🇧 English", callback_data="set_lang:en")
         ],
-        [InlineKeyboardButton(text="⬅️ Back / Назад", callback_data="main_menu", style="danger")]
+        [InlineKeyboardButton(text="⬅️ Back / Назад", callback_data="main_menu")]
     ])
     await callback.message.edit_text("🌐 Select Language / Выберите Язык:", reply_markup=kb)
 
@@ -393,8 +447,8 @@ async def cb_select_quality_grade(callback: CallbackQuery):
             broken_count = (await b_cur.fetchone())[0]
 
     buttons = [
-        [InlineKeyboardButton(text=f"{fresh_label} [{fresh_count}]", callback_data=f"list_prods:{p_type}:{country_id}:fresh:1:{back_page}", style="success")],
-        [InlineKeyboardButton(text=f"{broken_label} [{broken_count}]", callback_data=f"list_prods:{p_type}:{country_id}:broken:1:{back_page}", style="danger")],
+        [InlineKeyboardButton(text=f"{fresh_label} [{fresh_count}]", callback_data=f"list_prods:{p_type}:{country_id}:fresh:1:{back_page}")],
+        [InlineKeyboardButton(text=f"{broken_label} [{broken_count}]", callback_data=f"list_prods:{p_type}:{country_id}:broken:1:{back_page}")],
         [InlineKeyboardButton(text=t["btn_back"], callback_data=f"buy_cat:{p_type}:{back_page}")]
     ]
     
@@ -447,8 +501,7 @@ async def cb_list_products(callback: CallbackQuery):
         text += f"🔹 <b>ID:</b> <code>{html.escape(p['product_id'])}</code> — Price: <b>${p['price']:.2f}</b>\n"
         buttons.append([InlineKeyboardButton(
             text=f"🛒 Buy {p['product_id']} (${p['price']:.2f})",
-            callback_data=f"exec_buy:{p['product_id']}",
-            style="success"
+            callback_data=f"exec_buy:{p['product_id']}"
         )])
 
     nav_buttons = []
@@ -527,12 +580,12 @@ async def cb_wallet_topup_start(callback: CallbackQuery, state: FSMContext):
     
     buttons = [
         [
-            InlineKeyboardButton(text="USDT (BEP-20)", callback_data="dep_method:usdt_bep20", style="primary"),
-            InlineKeyboardButton(text="USDT (ERC-20)", callback_data="dep_method:usdt_erc20", style="primary")
+            InlineKeyboardButton(text="USDT (BEP-20)", callback_data="dep_method:usdt_bep20"),
+            InlineKeyboardButton(text="USDT (ERC-20)", callback_data="dep_method:usdt_erc20")
         ],
         [
-            InlineKeyboardButton(text="USDT (Polygon)", callback_data="dep_method:usdt_poly", style="primary"),
-            InlineKeyboardButton(text="USDT (TON)", callback_data="dep_method:usdt_ton", style="primary")
+            InlineKeyboardButton(text="USDT (Polygon)", callback_data="dep_method:usdt_poly"),
+            InlineKeyboardButton(text="USDT (TON)", callback_data="dep_method:usdt_ton")
         ],
         [InlineKeyboardButton(text=t["btn_support"], url=DEVELOPER_SUPPORT_LINK)],
         [InlineKeyboardButton(text=t["btn_home"], callback_data="main_menu")]
@@ -558,14 +611,14 @@ async def cb_topup_select_amount(callback: CallbackQuery, state: FSMContext):
 
     buttons = [
         [
-            InlineKeyboardButton(text="$4.50", callback_data="dep_amt:4.5", style="success"),
-            InlineKeyboardButton(text="$10.00", callback_data="dep_amt:10.0", style="success")
+            InlineKeyboardButton(text="$4.50", callback_data="dep_amt:4.5"),
+            InlineKeyboardButton(text="$10.00", callback_data="dep_amt:10.0")
         ],
         [
-            InlineKeyboardButton(text="$15.00", callback_data="dep_amt:15.0", style="success"),
-            InlineKeyboardButton(text="$25.00", callback_data="dep_amt:25.0", style="success")
+            InlineKeyboardButton(text="$15.00", callback_data="dep_amt:15.0"),
+            InlineKeyboardButton(text="$25.00", callback_data="dep_amt:25.0")
         ],
-        [InlineKeyboardButton(text="✏️ Custom Amount / Своя сумма USD", callback_data="dep_amt:custom", style="primary")],
+        [InlineKeyboardButton(text="✏️ Custom Amount / Своя сумма USD", callback_data="dep_amt:custom")],
         [InlineKeyboardButton(text=t["btn_back"], callback_data="wallet_topup")]
     ]
 
@@ -633,7 +686,7 @@ async def generate_invoice(event: CallbackQuery | Message, state: FSMContext, am
     buttons = [
         [InlineKeyboardButton(text="📋 Copy Address / Скопировать адрес", callback_data=f"copy_addr:{method_key}")],
         [InlineKeyboardButton(text=f"📋 Copy Amount / Скопировать · {coin_amount}", callback_data=f"copy_amt:{coin_amount}")],
-        [InlineKeyboardButton(text="✅ I Have Paid / Я оплатил", callback_data=f"topup_paid:{invoice_code}", style="success")],
+        [InlineKeyboardButton(text="✅ I Have Paid / Я оплатил", callback_data=f"topup_paid:{invoice_code}")],
         [InlineKeyboardButton(text="💬 Support", url=DEVELOPER_SUPPORT_LINK)],
         [InlineKeyboardButton(text="Back / Назад", callback_data="wallet_topup")]
     ]
@@ -686,8 +739,8 @@ async def process_proof_upload(message: Message, state: FSMContext):
 
     admin_kb = InlineKeyboardMarkup(inline_keyboard=[
         [
-            InlineKeyboardButton(text="✅ Approve", callback_data=f"adm_appr_topup:{invoice_code}", style="success"),
-            InlineKeyboardButton(text="❌ Reject", callback_data=f"adm_rej_topup:{invoice_code}", style="danger")
+            InlineKeyboardButton(text="✅ Approve", callback_data=f"adm_appr_topup:{invoice_code}"),
+            InlineKeyboardButton(text="❌ Reject", callback_data=f"adm_rej_topup:{invoice_code}")
         ]
     ])
 
@@ -756,11 +809,50 @@ async def cb_admin_panel(callback: CallbackQuery):
     if callback.from_user.id not in ADMIN_IDS: return
     
     kb = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="➕ Bulk Add Account Stock", callback_data="admin_add_prod", style="success")],
-        [InlineKeyboardButton(text="📥 Export Database (/export_db)", callback_data="admin_export_db", style="primary")],
-        [InlineKeyboardButton(text="🏠 Main Menu", callback_data="main_menu", style="danger")]
+        [InlineKeyboardButton(text="➕ Bulk Add Account Stock", callback_data="admin_add_prod")],
+        [InlineKeyboardButton(text="📤 Export Full Stock (.txt)", callback_data="admin_export_txt")],
+        [InlineKeyboardButton(text="📥 Export Database (/export_db)", callback_data="admin_export_db")],
+        [InlineKeyboardButton(text="🏠 Main Menu", callback_data="main_menu")]
     ])
-    await callback.message.edit_text("👨‍💻 <b>ADMIN CONTROL PANEL</b>\n\nSelect operation mode:\n\n<i>To import DB, directly send a `.db` file to the chat.</i>", reply_markup=kb, parse_mode="HTML")
+    await callback.message.edit_text("👨‍💻 <b>ADMIN CONTROL PANEL</b>\n\nSelect operation mode:\n\n<i>Send a `.db` file to import DB or send a `.txt` file during upload mode to import stock.</i>", reply_markup=kb, parse_mode="HTML")
+
+@router.callback_query(F.data == "admin_export_txt")
+async def cb_admin_export_txt(callback: CallbackQuery):
+    if callback.from_user.id not in ADMIN_IDS: return
+
+    async with get_db() as db:
+        db.row_factory = aiosqlite.Row
+        async with db.execute("""
+            SELECT c.name as country_name, c.flag, p.product_id, p.price, p.quality, p.status 
+            FROM products p
+            JOIN countries c ON p.country_id = c.id
+            ORDER BY c.name ASC, p.quality ASC
+        """) as cursor:
+            products = await cursor.fetchall()
+
+    if not products:
+        await callback.answer("❌ No stock/products available to export.", show_alert=True)
+        return
+
+    output_lines = ["==========================================", "       FULL STOCK DATABASE EXPORT         ", "==========================================\n"]
+    current_country = ""
+
+    for p in products:
+        if p['country_name'] != current_country:
+            current_country = p['country_name']
+            output_lines.append(f"\n--- {p['flag']} {current_country.upper()} ---")
+        
+        output_lines.append(f"ID: {p['product_id']} | Quality: {p['quality']} | Price: ${p['price']:.2f} | Status: {p['status']}")
+
+    file_bytes = "\n".join(output_lines).encode('utf-8')
+    txt_file = BufferedInputFile(file_bytes, filename="full_stock_export.txt")
+    
+    await callback.message.answer_document(
+        document=txt_file,
+        caption="📄 <b>Full Stock Export (.txt) Generated Successfully!</b>",
+        parse_mode="HTML"
+    )
+    await callback.answer("Exported!")
 
 @router.callback_query(F.data == "admin_export_db")
 async def cb_admin_export_db(callback: CallbackQuery):
@@ -821,8 +913,8 @@ async def cb_item_country(callback: CallbackQuery, state: FSMContext):
     await state.update_data(country_id=c_id)
 
     qual_buttons = [
-        [InlineKeyboardButton(text="🟢 Spam-Free Account", callback_data="qual:Spam-Free Account", style="success")],
-        [InlineKeyboardButton(text="🔴 Spam Account", callback_data="qual:Spam Account", style="danger")]
+        [InlineKeyboardButton(text="🟢 Spam-Free Account", callback_data="qual:Spam-Free Account")],
+        [InlineKeyboardButton(text="🔴 Spam Account", callback_data="qual:Spam Account")]
     ]
 
     await state.set_state(AddProductFSM.select_quality)
@@ -848,12 +940,12 @@ async def process_item_price(message: Message, state: FSMContext):
     await state.set_state(AddProductFSM.enter_content)
     
     exit_kb = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="🛑 Finish / Exit Upload Mode", callback_data="exit_upload", style="danger")]
+        [InlineKeyboardButton(text="🛑 Finish / Exit Upload Mode", callback_data="exit_upload")]
     ])
 
     await message.answer(
         "🆔 <b>ADD ACCOUNTS (Continuous Input Mode)</b>\n\n"
-        "Send Account Serial Keys or Logins line-by-line.\n"
+        "Send Account Serial Keys line-by-line OR upload a <code>.txt</code> file directly.\n"
         "Bot will remain open for more inputs until you click Finish below.",
         reply_markup=exit_kb,
         parse_mode="HTML"
@@ -866,7 +958,7 @@ async def process_item_content(message: Message, state: FSMContext):
     lines = [line.strip() for line in raw_text.split("\n") if line.strip()]
 
     if not lines:
-        await message.answer("❌ No valid keys found. Please try sending again.")
+        await message.answer("❌ No valid keys found. Please try sending text or a .txt file again.")
         return
 
     added_count = 0
@@ -897,13 +989,13 @@ async def process_item_content(message: Message, state: FSMContext):
     await state.update_data(uploaded_total=current_total)
 
     exit_kb = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="🛑 Finish / Exit Upload Mode", callback_data="exit_upload", style="danger")]
+        [InlineKeyboardButton(text="🛑 Finish / Exit Upload Mode", callback_data="exit_upload")]
     ])
 
     await message.answer(
         f"✅ <b>BATCH SAVED! (+{added_count} Accounts)</b>\n"
         f"📊 <b>Total Uploaded in this Session:</b> <code>{current_total}</code>\n\n"
-        f"📥 <i>Send more lines to continue adding, or tap Finish when completed.</i>",
+        f"📥 <i>Send more lines or a .txt file to continue adding, or tap Finish when completed.</i>",
         reply_markup=exit_kb,
         parse_mode="HTML"
     )
