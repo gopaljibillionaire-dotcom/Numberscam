@@ -1,15 +1,14 @@
 import asyncio
 import html
 import logging
+import os
 import random
-import re
-from datetime import datetime, timezone
-from typing import Optional, List, Dict
+from typing import Optional, List
 
 import aiohttp
 import aiosqlite
 from aiogram import Bot, Dispatcher, F, Router
-from aiogram.filters import CommandStart, StateFilter
+from aiogram.filters import Command, CommandStart, StateFilter
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
 from aiogram.fsm.storage.memory import MemoryStorage
@@ -18,13 +17,13 @@ from aiogram.types import (
     CallbackQuery,
     InlineKeyboardMarkup,
     InlineKeyboardButton,
+    FSInputFile,
 )
 
 from config import (
     BOT_TOKEN,
     ADMIN_IDS,
     DATABASE_NAME,
-    DEFAULT_BIN_CHANNEL_ID,
     DEVELOPER_SUPPORT_LINK,
     PAYMENT_METHODS,
     FALLBACK_PRICES,
@@ -51,29 +50,6 @@ async def get_crypto_price_usd(coin_id: str) -> float:
     except Exception as e:
         logger.warning(f"Failed to fetch live price for {coin_id}: {e}. Using fallback.")
     return FALLBACK_PRICES.get(coin_id, 1.0)
-
-def parse_telegram_post_link(link: str):
-    if not link:
-        return None, None
-
-    private_match = re.search(r"t\.me/c/(\d+)/(\d+)", link)
-    if private_match:
-        raw_id = private_match.group(1)
-        message_id = int(private_match.group(2))
-        channel_id = int(f"-{raw_id}") if raw_id.startswith("100") else int(f"-100{raw_id}")
-        return channel_id, message_id
-
-    public_match = re.search(r"t\.me/([^/]+)/(\d+)", link)
-    if public_match:
-        channel_id = f"@{public_match.group(1)}"
-        message_id = int(public_match.group(2))
-        return channel_id, message_id
-
-    msg_only_match = re.search(r"(\d+)$", link.strip())
-    if msg_only_match:
-        return DEFAULT_BIN_CHANNEL_ID, int(msg_only_match.group(1))
-
-    return None, None
 
 async def init_db():
     async with aiosqlite.connect(DATABASE_NAME) as db:
@@ -105,7 +81,7 @@ async def init_db():
             CREATE TABLE IF NOT EXISTS products (
                 product_id TEXT PRIMARY KEY,
                 seller_id INTEGER DEFAULT 0,
-                type TEXT NOT NULL,
+                type TEXT NOT NULL DEFAULT 'account',
                 country_id INTEGER NOT NULL,
                 price REAL NOT NULL,
                 quality TEXT NOT NULL,
@@ -153,7 +129,6 @@ def get_db():
     return aiosqlite.connect(DATABASE_NAME)
 
 class AddProductFSM(StatesGroup):
-    select_type = State()
     select_country = State()
     select_quality = State()
     enter_price = State()
@@ -169,8 +144,7 @@ def get_main_keyboard(user_id: int, lang: str = "ru") -> InlineKeyboardMarkup:
     t = TEXTS.get(lang, TEXTS["ru"])
     buttons = [
         [
-            InlineKeyboardButton(text=t["btn_buy_account"], callback_data="buy_cat:account:1", style="primary"),
-            InlineKeyboardButton(text=t["btn_buy_session"], callback_data="buy_cat:session:1", style="primary")
+            InlineKeyboardButton(text=t["btn_buy_account"], callback_data="buy_cat:account:1", style="primary")
         ],
         [
             InlineKeyboardButton(text=t["btn_topup"], callback_data="wallet_topup", style="success")
@@ -241,6 +215,26 @@ async def cmd_start(message: Message):
     )
     await message.answer(text, reply_markup=get_main_keyboard(message.from_user.id, lang), parse_mode="HTML")
 
+@router.message(Command("export_db"))
+async def cmd_export_db(message: Message):
+    if message.from_user.id not in ADMIN_IDS:
+        return
+    if os.path.exists(DATABASE_NAME):
+        db_file = FSInputFile(DATABASE_NAME)
+        await message.answer_document(db_file, caption="📂 <b>Database Backup Exported</b>", parse_mode="HTML")
+    else:
+        await message.answer("❌ Database file not found.")
+
+@router.message(F.document, F.from_user.id.in_(ADMIN_IDS))
+async def process_import_db(message: Message):
+    if not message.document.file_name.endswith(".db"):
+        return
+    
+    file_id = message.document.file_id
+    file_info = await message.bot.get_file(file_id)
+    await message.bot.download_file(file_info.file_path, DATABASE_NAME)
+    await message.answer("✅ <b>Database file imported successfully!</b>", parse_mode="HTML")
+
 @router.callback_query(F.data.startswith("first_lang:"))
 async def cb_first_lang_selection(callback: CallbackQuery):
     lang = callback.data.split(":")[1]
@@ -307,7 +301,7 @@ async def cb_select_category(callback: CallbackQuery):
     parts = callback.data.split(":")
     p_type = parts[1]
     page = int(parts[2]) if len(parts) > 2 else 1
-    per_page = 5
+    per_page = 20
 
     user = await get_or_create_user(callback.from_user.id, callback.from_user.username, callback.from_user.first_name)
     lang = user.get('language') or 'ru'
@@ -328,17 +322,31 @@ async def cb_select_category(callback: CallbackQuery):
             countries = await cursor.fetchall()
 
         buttons = []
-        for c in countries:
+        for i in range(0, len(countries), 2):
+            row_btns = []
+            c1 = countries[i]
             async with db.execute(
-                "SELECT COUNT(*) FROM products WHERE type = ? AND country_id = ? AND status = 'available'",
-                (p_type, c['id'])
+                "SELECT COUNT(*) FROM products WHERE country_id = ? AND status = 'available'",
+                (c1['id'],)
             ) as count_cur:
-                total_stock = (await count_cur.fetchone())[0]
+                st1 = (await count_cur.fetchone())[0]
+            row_btns.append(InlineKeyboardButton(
+                text=f"{c1['flag']} {c1['name'].split(' (')[0]} [{st1}]",
+                callback_data=f"buy_country:{p_type}:{c1['id']}:{page}"
+            ))
 
-            buttons.append([InlineKeyboardButton(
-                text=f"{c['flag']} {c['name']} [{total_stock}]",
-                callback_data=f"buy_country:{p_type}:{c['id']}:{page}"
-            )])
+            if i + 1 < len(countries):
+                c2 = countries[i + 1]
+                async with db.execute(
+                    "SELECT COUNT(*) FROM products WHERE country_id = ? AND status = 'available'",
+                    (c2['id'],)
+                ) as count_cur2:
+                    st2 = (await count_cur2.fetchone())[0]
+                row_btns.append(InlineKeyboardButton(
+                    text=f"{c2['flag']} {c2['name'].split(' (')[0]} [{st2}]",
+                    callback_data=f"buy_country:{p_type}:{c2['id']}:{page}"
+                ))
+            buttons.append(row_btns)
 
     nav_buttons = []
     if page > 1:
@@ -369,18 +377,18 @@ async def cb_select_quality_grade(callback: CallbackQuery):
         async with db.execute("SELECT * FROM countries WHERE id = ?", (country_id,)) as c_cur:
             country = await c_cur.fetchone()
 
-        fresh_label = t["fresh_acc_label"] if p_type == "account" else t["fresh_sess_label"]
-        broken_label = t["broken_acc_label"] if p_type == "account" else t["broken_sess_label"]
+        fresh_label = t["fresh_acc_label"]
+        broken_label = t["broken_acc_label"]
 
         async with db.execute(
-            "SELECT COUNT(*) FROM products WHERE type = ? AND country_id = ? AND quality LIKE '%Spam-Free%' AND status = 'available'",
-            (p_type, country_id)
+            "SELECT COUNT(*) FROM products WHERE country_id = ? AND quality LIKE '%Spam-Free%' AND status = 'available'",
+            (country_id,)
         ) as f_cur:
             fresh_count = (await f_cur.fetchone())[0]
 
         async with db.execute(
-            "SELECT COUNT(*) FROM products WHERE type = ? AND country_id = ? AND quality NOT LIKE '%Spam-Free%' AND status = 'available'",
-            (p_type, country_id)
+            "SELECT COUNT(*) FROM products WHERE country_id = ? AND quality NOT LIKE '%Spam-Free%' AND status = 'available'",
+            (country_id,)
         ) as b_cur:
             broken_count = (await b_cur.fetchone())[0]
 
@@ -411,8 +419,8 @@ async def cb_list_products(callback: CallbackQuery):
     async with get_db() as db:
         db.row_factory = aiosqlite.Row
         async with db.execute(
-            "SELECT COUNT(*) FROM products WHERE type = ? AND country_id = ? AND quality LIKE ? AND status = 'available'",
-            (p_type, country_id, quality_like)
+            "SELECT COUNT(*) FROM products WHERE country_id = ? AND quality LIKE ? AND status = 'available'",
+            (country_id, quality_like)
         ) as count_cur:
             total_items = (await count_cur.fetchone())[0]
 
@@ -421,59 +429,36 @@ async def cb_list_products(callback: CallbackQuery):
             await callback.message.edit_text(t["out_of_stock"], reply_markup=kb, parse_mode="HTML")
             return
 
-        per_page = 5 if p_type == "account" else 10
+        per_page = 5
         total_pages = max(1, (total_items + per_page - 1) // per_page)
         offset = (prod_page - 1) * per_page
 
         async with db.execute(
-            "SELECT * FROM products WHERE type = ? AND country_id = ? AND quality LIKE ? AND status = 'available' LIMIT ? OFFSET ?",
-            (p_type, country_id, quality_like, per_page, offset)
+            "SELECT * FROM products WHERE country_id = ? AND quality LIKE ? AND status = 'available' LIMIT ? OFFSET ?",
+            (country_id, quality_like, per_page, offset)
         ) as cursor:
             products = await cursor.fetchall()
 
     text = t["catalog_title"]
     buttons = []
 
-    if p_type == "account":
-        text += f"📄 <b>Page {prod_page}/{total_pages}</b> (Showing {len(products)} of {total_items} items):\n\n"
-        for p in products:
-            text += f"🔹 <b>ID:</b> <code>{html.escape(p['product_id'])}</code> — Price: <b>${p['price']:.2f}</b>\n"
-            buttons.append([InlineKeyboardButton(
-                text=f"🛒 Buy {p['product_id']} (${p['price']:.2f})",
-                callback_data=f"exec_buy:{p['product_id']}",
-                style="success"
-            )])
-
-        nav_buttons = []
-        if prod_page > 1:
-            nav_buttons.append(InlineKeyboardButton(text="⬅️ Prev", callback_data=f"list_prods:{p_type}:{country_id}:{grade}:{prod_page - 1}:{back_page}"))
-        nav_buttons.append(InlineKeyboardButton(text=f"📄 {prod_page}/{total_pages}", callback_data="ignore"))
-        if prod_page < total_pages:
-            nav_buttons.append(InlineKeyboardButton(text="Next ➡️", callback_data=f"list_prods:{p_type}:{country_id}:{grade}:{prod_page + 1}:{back_page}"))
-        if nav_buttons:
-            buttons.append(nav_buttons)
-    else:
-        price = products[0]['price']
-        text += f"⚡ <b>Available Sessions Page {prod_page}/{total_pages}</b> ({len(products)} listed):\n\n"
-        for idx, p in enumerate(products, 1):
-            text += f"{idx}. <code>{p['bin_link']}</code>\n"
-
-        text += f"\n💵 <b>Unit Price:</b> <code>${price:.2f}</code>\n"
-        
+    text += f"📄 <b>Page {prod_page}/{total_pages}</b> (Showing {len(products)} of {total_items} items):\n\n"
+    for p in products:
+        text += f"🔹 <b>ID:</b> <code>{html.escape(p['product_id'])}</code> — Price: <b>${p['price']:.2f}</b>\n"
         buttons.append([InlineKeyboardButton(
-            text=f"🎲 Send Randomly (${price:.2f})",
-            callback_data=f"exec_buy_broken:{p_type}:{country_id}:{grade}",
+            text=f"🛒 Buy {p['product_id']} (${p['price']:.2f})",
+            callback_data=f"exec_buy:{p['product_id']}",
             style="success"
         )])
 
-        nav_buttons = []
-        if prod_page > 1:
-            nav_buttons.append(InlineKeyboardButton(text="⬅️ Prev", callback_data=f"list_prods:{p_type}:{country_id}:{grade}:{prod_page - 1}:{back_page}"))
-        nav_buttons.append(InlineKeyboardButton(text=f"📄 {prod_page}/{total_pages}", callback_data="ignore"))
-        if prod_page < total_pages:
-            nav_buttons.append(InlineKeyboardButton(text="Next ➡️", callback_data=f"list_prods:{p_type}:{country_id}:{grade}:{prod_page + 1}:{back_page}"))
-        if nav_buttons:
-            buttons.append(nav_buttons)
+    nav_buttons = []
+    if prod_page > 1:
+        nav_buttons.append(InlineKeyboardButton(text="⬅️ Prev", callback_data=f"list_prods:{p_type}:{country_id}:{grade}:{prod_page - 1}:{back_page}"))
+    nav_buttons.append(InlineKeyboardButton(text=f"📄 {prod_page}/{total_pages}", callback_data="ignore"))
+    if prod_page < total_pages:
+        nav_buttons.append(InlineKeyboardButton(text="Next ➡️", callback_data=f"list_prods:{p_type}:{country_id}:{grade}:{prod_page + 1}:{back_page}"))
+    if nav_buttons:
+        buttons.append(nav_buttons)
 
     buttons.append([InlineKeyboardButton(text=t["btn_back"], callback_data=f"buy_country:{p_type}:{country_id}:{back_page}")])
     await callback.message.edit_text(text, reply_markup=InlineKeyboardMarkup(inline_keyboard=buttons), parse_mode="HTML", disable_web_page_preview=True)
@@ -499,7 +484,7 @@ async def cb_execute_buy_fresh(callback: CallbackQuery):
 
             if not p:
                 await db.execute("ROLLBACK")
-                await callback.answer("❌ Item already sold!", show_alert=True)
+                await callback.answer("❌ Account already sold!", show_alert=True)
                 return
 
             if u_row['balance'] < p['price']:
@@ -529,92 +514,6 @@ async def cb_execute_buy_fresh(callback: CallbackQuery):
         except Exception as e:
             await db.execute("ROLLBACK")
             logger.error(f"Purchase Error: {e}")
-            await callback.answer("❌ Purchase failed.", show_alert=True)
-
-@router.callback_query(F.data.startswith("exec_buy_broken:"))
-async def cb_execute_buy_broken(callback: CallbackQuery):
-    _, p_type, country_id, grade = callback.data.split(":")
-    user_id = callback.from_user.id
-    user = await get_or_create_user(user_id, callback.from_user.username, callback.from_user.first_name)
-    lang = user.get('language') or 'ru'
-    t = TEXTS[lang]
-
-    quality_like = "%Spam-Free%" if grade == "fresh" else "%Spam%"
-
-    async with get_db() as db:
-        db.row_factory = aiosqlite.Row
-        try:
-            await db.execute("BEGIN IMMEDIATE")
-            
-            async with db.execute(
-                "SELECT * FROM products WHERE type = ? AND country_id = ? AND quality LIKE ? AND status = 'available'",
-                (p_type, country_id, quality_like)
-            ) as p_cur:
-                available_items = await p_cur.fetchall()
-
-            if not available_items:
-                await db.execute("ROLLBACK")
-                await callback.answer(t["out_of_stock"], show_alert=True)
-                return
-
-            p = random.choice(available_items)
-
-            async with db.execute("SELECT balance FROM users WHERE telegram_id = ?", (user_id,)) as u_cur:
-                u_row = await u_cur.fetchone()
-
-            if u_row['balance'] < p['price']:
-                await db.execute("ROLLBACK")
-                await callback.answer(t["insufficient_funds"].format(price=p['price']), show_alert=True)
-                return
-
-            new_balance = u_row['balance'] - p['price']
-            await db.execute("UPDATE users SET balance = ? WHERE telegram_id = ?", (new_balance, user_id))
-            await db.execute("UPDATE products SET status = 'sold' WHERE product_id = ?", (p['product_id'],))
-
-            order_id = f"ORD-{random.randint(100000, 999999)}"
-            await db.execute(
-                "INSERT INTO orders (order_id, user_id, product_id, amount, status) VALUES (?, ?, ?, ?, ?)",
-                (order_id, user_id, p['product_id'], p['price'], "completed")
-            )
-            await db.commit()
-
-            channel_id, message_id = parse_telegram_post_link(p['bin_link'])
-
-            if not channel_id:
-                channel_id = DEFAULT_BIN_CHANNEL_ID
-
-            delivered = False
-            if channel_id and message_id:
-                try:
-                    await callback.bot.copy_message(
-                        chat_id=user_id,
-                        from_chat_id=channel_id,
-                        message_id=message_id,
-                        caption=f"🎉 <b>YOUR PURCHASED SESSION FILE</b>\nOrder ID: <code>{order_id}</code>",
-                        parse_mode="HTML"
-                    )
-                    delivered = True
-                except Exception as send_err:
-                    logger.error(f"Failed to copy post from {channel_id} (msg {message_id}): {send_err}")
-
-            if not delivered:
-                await callback.bot.send_message(
-                    chat_id=user_id,
-                    text=f"⚠️ <b>Direct Delivery Notice</b>\nOrder ID: <code>{order_id}</code>\n\nYour session data link:\n<code>{p['bin_link']}</code>",
-                    parse_mode="HTML"
-                )
-
-            text = t["purchase_success_broken"].format(
-                order_id=order_id,
-                quality=html.escape(p['quality']),
-                price=p['price'],
-                balance=new_balance
-            )
-            await callback.message.edit_text(text, reply_markup=InlineKeyboardMarkup(inline_keyboard=back_home_buttons(lang)), parse_mode="HTML")
-
-        except Exception as e:
-            await db.execute("ROLLBACK")
-            logger.error(f"Broken Purchase Error: {e}")
             await callback.answer("❌ Purchase failed.", show_alert=True)
 
 @router.callback_query(F.data == "wallet_topup")
@@ -735,7 +634,7 @@ async def generate_invoice(event: CallbackQuery | Message, state: FSMContext, am
         [InlineKeyboardButton(text="📋 Copy Address / Скопировать адрес", callback_data=f"copy_addr:{method_key}")],
         [InlineKeyboardButton(text=f"📋 Copy Amount / Скопировать · {coin_amount}", callback_data=f"copy_amt:{coin_amount}")],
         [InlineKeyboardButton(text="✅ I Have Paid / Я оплатил", callback_data=f"topup_paid:{invoice_code}", style="success")],
-        [InlineKeyboardButton(text="💬 Support / Поддержка", url=DEVELOPER_SUPPORT_LINK)],
+        [InlineKeyboardButton(text="💬 Support", url=DEVELOPER_SUPPORT_LINK)],
         [InlineKeyboardButton(text="Back / Назад", callback_data="wallet_topup")]
     ]
     
@@ -857,26 +756,27 @@ async def cb_admin_panel(callback: CallbackQuery):
     if callback.from_user.id not in ADMIN_IDS: return
     
     kb = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="➕ Bulk Add Stock Items", callback_data="admin_add_prod", style="success")],
-        [InlineKeyboardButton(text="🏠 Main Menu", callback_data="main_menu", style="primary")]
+        [InlineKeyboardButton(text="➕ Bulk Add Account Stock", callback_data="admin_add_prod", style="success")],
+        [InlineKeyboardButton(text="📥 Export Database (/export_db)", callback_data="admin_export_db", style="primary")],
+        [InlineKeyboardButton(text="🏠 Main Menu", callback_data="main_menu", style="danger")]
     ])
-    await callback.message.edit_text("👨‍💻 <b>ADMIN CONTROL PANEL</b>\n\nSelect operation mode:", reply_markup=kb, parse_mode="HTML")
+    await callback.message.edit_text("👨‍💻 <b>ADMIN CONTROL PANEL</b>\n\nSelect operation mode:\n\n<i>To import DB, directly send a `.db` file to the chat.</i>", reply_markup=kb, parse_mode="HTML")
+
+@router.callback_query(F.data == "admin_export_db")
+async def cb_admin_export_db(callback: CallbackQuery):
+    if callback.from_user.id not in ADMIN_IDS: return
+    if os.path.exists(DATABASE_NAME):
+        db_file = FSInputFile(DATABASE_NAME)
+        await callback.message.answer_document(db_file, caption="📂 <b>Database Backup Exported</b>", parse_mode="HTML")
+        await callback.answer("Database sent!")
+    else:
+        await callback.answer("❌ Database file not found.", show_alert=True)
 
 @router.callback_query(F.data == "admin_add_prod")
 async def cb_start_add_item(callback: CallbackQuery, state: FSMContext):
     if callback.from_user.id not in ADMIN_IDS: return
     
-    kb = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="📱 Account Inventory", callback_data="prod_type:account", style="primary")],
-        [InlineKeyboardButton(text="⚡ Session Inventory", callback_data="prod_type:session", style="primary")]
-    ])
-    await state.set_state(AddProductFSM.select_type)
-    await callback.message.edit_text("Select Product Category to Stock:", reply_markup=kb)
-
-@router.callback_query(F.data.startswith("prod_type:"), StateFilter(AddProductFSM.select_type))
-async def cb_item_type(callback: CallbackQuery, state: FSMContext):
-    p_type = callback.data.split(":")[1]
-    await state.update_data(p_type=p_type)
+    await state.update_data(p_type="account")
     await render_admin_country_selection(callback, state, page=1)
 
 @router.callback_query(F.data.startswith("admin_country_page:"), StateFilter(AddProductFSM.select_country))
@@ -885,7 +785,7 @@ async def cb_admin_country_page(callback: CallbackQuery, state: FSMContext):
     await render_admin_country_selection(callback, state, page=page)
 
 async def render_admin_country_selection(callback: CallbackQuery, state: FSMContext, page: int = 1):
-    per_page = 10
+    per_page = 20
     async with get_db() as db:
         db.row_factory = aiosqlite.Row
         async with db.execute("SELECT COUNT(*) FROM countries WHERE is_enabled = 1") as total_cur:
@@ -897,7 +797,12 @@ async def render_admin_country_selection(callback: CallbackQuery, state: FSMCont
         async with db.execute("SELECT * FROM countries WHERE is_enabled = 1 ORDER BY name ASC LIMIT ? OFFSET ?", (per_page, offset)) as cursor:
             countries = await cursor.fetchall()
 
-    buttons = [[InlineKeyboardButton(text=f"{c['flag']} {c['name']}", callback_data=f"prod_c:{c['id']}")] for c in countries]
+    buttons = []
+    for i in range(0, len(countries), 2):
+        row_btns = [InlineKeyboardButton(text=f"{countries[i]['flag']} {countries[i]['name'].split(' (')[0]}", callback_data=f"prod_c:{countries[i]['id']}")]
+        if i + 1 < len(countries):
+            row_btns.append(InlineKeyboardButton(text=f"{countries[i+1]['flag']} {countries[i+1]['name'].split(' (')[0]}", callback_data=f"prod_c:{countries[i+1]['id']}"))
+        buttons.append(row_btns)
     
     nav_buttons = []
     if page > 1:
@@ -914,23 +819,14 @@ async def render_admin_country_selection(callback: CallbackQuery, state: FSMCont
 async def cb_item_country(callback: CallbackQuery, state: FSMContext):
     c_id = int(callback.data.split(":")[1])
     await state.update_data(country_id=c_id)
-    
-    data = await state.get_data()
-    p_type = data['p_type']
 
-    if p_type == "account":
-        qual_buttons = [
-            [InlineKeyboardButton(text="🟢 Spam-Free Account", callback_data="qual:Spam-Free Account", style="success")],
-            [InlineKeyboardButton(text="🔴 Spam Account", callback_data="qual:Spam Account", style="danger")]
-        ]
-    else:
-        qual_buttons = [
-            [InlineKeyboardButton(text="⚡ Spam-Free Session", callback_data="qual:Spam-Free Session", style="success")],
-            [InlineKeyboardButton(text="🔥 Spam Session", callback_data="qual:Spam Session", style="danger")]
-        ]
+    qual_buttons = [
+        [InlineKeyboardButton(text="🟢 Spam-Free Account", callback_data="qual:Spam-Free Account", style="success")],
+        [InlineKeyboardButton(text="🔴 Spam Account", callback_data="qual:Spam Account", style="danger")]
+    ]
 
     await state.set_state(AddProductFSM.select_quality)
-    await callback.message.edit_text("Select Item Tier:", reply_markup=InlineKeyboardMarkup(inline_keyboard=qual_buttons))
+    await callback.message.edit_text("Select Account Quality Tier:", reply_markup=InlineKeyboardMarkup(inline_keyboard=qual_buttons))
 
 @router.callback_query(F.data.startswith("qual:"), StateFilter(AddProductFSM.select_quality))
 async def cb_item_qual(callback: CallbackQuery, state: FSMContext):
@@ -949,30 +845,19 @@ async def process_item_price(message: Message, state: FSMContext):
         return
 
     await state.update_data(price=price)
-    data = await state.get_data()
     await state.set_state(AddProductFSM.enter_content)
     
     exit_kb = InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="🛑 Finish / Exit Upload Mode", callback_data="exit_upload", style="danger")]
     ])
 
-    if data['p_type'] == "account":
-        await message.answer(
-            "🆔 <b>ADD ACCOUNTS (Continuous Input Mode)</b>\n\n"
-            "Send Account Serial Keys or IDs line-by-line.\n"
-            "Bot will remain open for more inputs until you click Finish below.",
-            reply_markup=exit_kb,
-            parse_mode="HTML"
-        )
-    else:
-        await message.answer(
-            "🔗 <b>ADD SESSIONS FROM BIN CHANNEL (Continuous Mode)</b>\n\n"
-            "Send Telegram Channel post links line-by-line.\n"
-            "You can keep sending batches (e.g. up to 50+ sessions) without exiting.\n"
-            "Click Finish below when done.",
-            reply_markup=exit_kb,
-            parse_mode="HTML"
-        )
+    await message.answer(
+        "🆔 <b>ADD ACCOUNTS (Continuous Input Mode)</b>\n\n"
+        "Send Account Serial Keys or Logins line-by-line.\n"
+        "Bot will remain open for more inputs until you click Finish below.",
+        reply_markup=exit_kb,
+        parse_mode="HTML"
+    )
 
 @router.message(StateFilter(AddProductFSM.enter_content))
 async def process_item_content(message: Message, state: FSMContext):
@@ -981,37 +866,29 @@ async def process_item_content(message: Message, state: FSMContext):
     lines = [line.strip() for line in raw_text.split("\n") if line.strip()]
 
     if not lines:
-        await message.answer("❌ No valid links/IDs found. Please try sending again.")
+        await message.answer("❌ No valid keys found. Please try sending again.")
         return
 
-    is_account = data['p_type'] == "account"
     added_count = 0
     admin_id = message.from_user.id
 
     async with get_db() as db:
         for item in lines:
-            if is_account:
-                prod_id = item.upper()
-                bin_link = ""
-            else:
-                bin_link = item
-                prod_id = f"SES-{random.randint(1000000, 9999999)}"
-
+            prod_id = item.upper()
             try:
                 await db.execute("""
                     INSERT INTO products (product_id, seller_id, type, country_id, price, quality, bin_link, status)
-                    VALUES (?, ?, ?, ?, ?, ?, ?, 'available')
+                    VALUES (?, ?, 'account', ?, ?, ?, '', 'available')
                     ON CONFLICT(product_id) DO UPDATE SET
                         seller_id=excluded.seller_id,
                         price=excluded.price,
                         quality=excluded.quality,
-                        bin_link=excluded.bin_link,
                         status='available'
-                """, (prod_id, admin_id, data['p_type'], data['country_id'], data['price'], data['quality'], bin_link))
+                """, (prod_id, admin_id, data['country_id'], data['price'], data['quality']))
                 
                 added_count += 1
             except Exception as e:
-                logger.error(f"Failed to add item '{item}': {e}")
+                logger.error(f"Failed to add account '{item}': {e}")
                 continue
 
         await db.commit()
@@ -1024,7 +901,7 @@ async def process_item_content(message: Message, state: FSMContext):
     ])
 
     await message.answer(
-        f"✅ <b>BATCH SAVED! (+{added_count} Items)</b>\n"
+        f"✅ <b>BATCH SAVED! (+{added_count} Accounts)</b>\n"
         f"📊 <b>Total Uploaded in this Session:</b> <code>{current_total}</code>\n\n"
         f"📥 <i>Send more lines to continue adding, or tap Finish when completed.</i>",
         reply_markup=exit_kb,
@@ -1038,8 +915,8 @@ async def cb_exit_upload_mode(callback: CallbackQuery, state: FSMContext):
     await state.clear()
     
     await callback.message.edit_text(
-        f"🎉 <b>UPLOAD COMPLETED SUCCESSFUL!</b>\n═══════════════════════\n\n"
-        f"📦 <b>Total Items Added:</b> <code>{uploaded_total}</code>",
+        f"🎉 <b>UPLOAD COMPLETED SUCCESSFULLY!</b>\n═══════════════════════\n\n"
+        f"📦 <b>Total Accounts Added:</b> <code>{uploaded_total}</code>",
         reply_markup=InlineKeyboardMarkup(inline_keyboard=back_home_buttons("ru")),
         parse_mode="HTML"
     )
@@ -1079,9 +956,7 @@ async def cb_my_orders(callback: CallbackQuery):
         db.row_factory = aiosqlite.Row
         async with db.execute("""
             SELECT o.order_id, o.amount, o.created_at, 
-                   COALESCE(p.quality, 'Standard Item') as quality, 
-                   COALESCE(p.type, 'account') as type, 
-                   COALESCE(p.bin_link, '') as bin_link, 
+                   COALESCE(p.quality, 'Standard Account') as quality, 
                    o.product_id
             FROM orders o 
             LEFT JOIN products p ON o.product_id = p.product_id 
@@ -1095,13 +970,11 @@ async def cb_my_orders(callback: CallbackQuery):
     else:
         text = t["orders_title"]
         for o in orders:
-            icon = "📱" if o['type'] == "account" else "⚡"
-            link_str = f"\n📂 <b>{t['order_item_link']}:</b> <code>{o['bin_link']}</code>" if o['bin_link'] else ""
             text += (
-                f"{icon} <b>{t['order_item_order']}:</b> <code>{o['order_id']}</code>\n"
+                f"📱 <b>{t['order_item_order']}:</b> <code>{o['order_id']}</code>\n"
                 f"✨ <b>{t['order_item_product']}:</b> {html.escape(o['quality'])}\n"
-                f"🆔 <b>{t['order_item_key']}:</b> <code>{html.escape(o['product_id'])}</code>\n"
-                f"💵 <b>{t['order_item_price']}:</b> <code>${o['amount']:.2f}</code>{link_str}\n"
+                f"🔑 <b>{t['order_item_key']}:</b> <code>{html.escape(o['product_id'])}</code>\n"
+                f"💵 <b>{t['order_item_price']}:</b> <code>${o['amount']:.2f}</code>\n"
                 f"───────────────────────\n"
             )
 
@@ -1113,7 +986,12 @@ async def cb_help(callback: CallbackQuery):
     lang = user.get('language') or 'ru'
     t = TEXTS[lang]
 
-    await callback.message.edit_text(t["help_text"], reply_markup=InlineKeyboardMarkup(inline_keyboard=back_home_buttons(lang)), parse_mode="HTML")
+    async with get_db() as db:
+        async with db.execute("SELECT COUNT(*) FROM products WHERE status = 'available'") as count_cur:
+            total_stock = (await count_cur.fetchone())[0]
+
+    text = t["help_text"].format(total_stock=total_stock)
+    await callback.message.edit_text(text, reply_markup=InlineKeyboardMarkup(inline_keyboard=back_home_buttons(lang)), parse_mode="HTML")
 
 async def main():
     await init_db()
