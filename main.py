@@ -29,6 +29,7 @@ from config import (
     PAYMENT_METHODS,
     FALLBACK_PRICES,
     TEXTS,
+    BACKUP_CHANNEL_ID,  # Ensure BACKUP_CHANNEL_ID (e.g. -100xxxxxxxxx) is defined in config.py
 )
 from countries import ALL_COUNTRIES_DATA
 
@@ -37,6 +38,60 @@ logging.basicConfig(
     format="%(asctime)s - %(name)s - %(levelname)s - [%(levelname)s] - %(message)s"
 )
 logger = logging.getLogger("digital_store_bot")
+
+# --- AUTO BACKUP & RESTORE UTILITIES ---
+
+async def auto_restore_db(bot: Bot):
+    """
+    Checks if the local database file exists. If missing, searches the specified
+    backup channel for the latest .db document, downloads it, and restores it.
+    """
+    if os.path.exists(DATABASE_NAME):
+        logger.info(f"Database file '{DATABASE_NAME}' found locally. Skipping auto-restore.")
+        return
+
+    logger.warning(f"Database file '{DATABASE_NAME}' NOT found! Attempting auto-restore from channel...")
+    try:
+        # Fetch recent messages from the backup channel to find the last .db backup
+        async for message in bot.get_chat_history(chat_id=BACKUP_CHANNEL_ID, limit=50):
+            if message.document and message.document.file_name.endswith(".db"):
+                logger.info(f"Latest backup file found in channel (File ID: {message.document.file_id}). Restoring...")
+                file_info = await bot.get_file(message.document.file_id)
+                await bot.download_file(file_info.file_path, DATABASE_NAME)
+                logger.info("Database successfully restored from channel backup!")
+                return
+        logger.error("No .db backup files found in the specified channel.")
+    except Exception as e:
+        logger.error(f"Failed to auto-restore database from channel: {e}")
+
+async def auto_backup_loop(bot: Bot):
+    """
+    Background worker that runs every 12 hours, sending the active database file
+    to the configured backup channel.
+    """
+    while True:
+        try:
+            # Wait 12 hours between backups (12 hours * 3600 seconds)
+            await asyncio.sleep(12 * 3600)
+            
+            if os.path.exists(DATABASE_NAME):
+                db_file = FSInputFile(DATABASE_NAME)
+                caption = "🔄 <b>Automated 12-Hour Database Backup</b>"
+                await bot.send_document(
+                    chat_id=BACKUP_CHANNEL_ID,
+                    document=db_file,
+                    caption=caption,
+                    parse_mode="HTML"
+                )
+                logger.info("Automated database backup sent to channel successfully.")
+            else:
+                logger.warning("Auto-backup skipped: Database file does not exist.")
+        except asyncio.CancelledError:
+            break
+        except Exception as e:
+            logger.error(f"Error occurring during auto-backup loop: {e}")
+
+# --- HELPER FUNCTIONS & DATABASE SETUP ---
 
 async def get_crypto_price_usd(coin_id: str) -> float:
     if not coin_id or coin_id == "tether":
@@ -1086,15 +1141,25 @@ async def cb_help(callback: CallbackQuery):
     await callback.message.edit_text(text, reply_markup=InlineKeyboardMarkup(inline_keyboard=back_home_buttons(lang)), parse_mode="HTML")
 
 async def main():
-    await init_db()
     bot = Bot(token=BOT_TOKEN)
+    
+    # Check and restore database if deleted/reset
+    await auto_restore_db(bot)
+    
+    # Initialize SQLite database schema
+    await init_db()
+
     dp = Dispatcher(storage=MemoryStorage())
     dp.include_router(router)
+
+    # Start the 12-hour automated backup loop as a background task
+    backup_task = asyncio.create_task(auto_backup_loop(bot))
 
     logger.info("Bot started successfully.")
     try:
         await dp.start_polling(bot)
     finally:
+        backup_task.cancel()
         await bot.session.close()
 
 if __name__ == "__main__":
