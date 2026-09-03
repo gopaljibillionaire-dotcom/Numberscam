@@ -4,6 +4,7 @@ BOT_TOKEN = "8863940881:AAFETiuaSBKtNDNq9NHcbnoSfGFFAVLOpwk"
 ADMIN_IDS = [7952327997]
 DATABASE_NAME = "marketplace.db"
 DEVELOPER_SUPPORT_LINK = "https://t.me/support"
+BACKUP_CHANNEL_ID = -1004412044372
 
 PAYMENT_METHODS: Dict[str, Dict[str, str]] = {
     "usdt_bep20": {
