@@ -1,12 +1,12 @@
 import asyncio
+import datetime
 import html
 import logging
-import os
 import random
 from typing import Optional, List
 
 import aiohttp
-import aiosqlite
+from motor.motor_asyncio import AsyncIOMotorClient
 from aiogram import Bot, Dispatcher, F, Router
 from aiogram.filters import Command, CommandStart, StateFilter
 from aiogram.fsm.context import FSMContext
@@ -17,19 +17,18 @@ from aiogram.types import (
     CallbackQuery,
     InlineKeyboardMarkup,
     InlineKeyboardButton,
-    FSInputFile,
     BufferedInputFile,
 )
 
 from config import (
     BOT_TOKEN,
     ADMIN_IDS,
+    MONGO_URI,
     DATABASE_NAME,
     DEVELOPER_SUPPORT_LINK,
     PAYMENT_METHODS,
     FALLBACK_PRICES,
     TEXTS,
-    BACKUP_CHANNEL_ID,  # Ensure BACKUP_CHANNEL_ID (e.g. -100xxxxxxxxx) is defined in config.py
 )
 from countries import ALL_COUNTRIES_DATA
 
@@ -39,59 +38,35 @@ logging.basicConfig(
 )
 logger = logging.getLogger("digital_store_bot")
 
-# --- AUTO BACKUP & RESTORE UTILITIES ---
+# --- MONGODB CONNECTION ---
+mongo_client = AsyncIOMotorClient(MONGO_URI)
+db = mongo_client[DATABASE_NAME]
 
-async def auto_restore_db(bot: Bot):
-    """
-    Checks if the local database file exists. If missing, searches the specified
-    backup channel for the latest .db document, downloads it, and restores it.
-    """
-    if os.path.exists(DATABASE_NAME):
-        logger.info(f"Database file '{DATABASE_NAME}' found locally. Skipping auto-restore.")
-        return
+users_col = db["users"]
+countries_col = db["countries"]
+products_col = db["products"]
+orders_col = db["orders"]
+topups_col = db["topups"]
 
-    logger.warning(f"Database file '{DATABASE_NAME}' NOT found! Attempting auto-restore from channel...")
-    try:
-        # Fetch recent messages from the backup channel to find the last .db backup
-        async for message in bot.get_chat_history(chat_id=BACKUP_CHANNEL_ID, limit=50):
-            if message.document and message.document.file_name.endswith(".db"):
-                logger.info(f"Latest backup file found in channel (File ID: {message.document.file_id}). Restoring...")
-                file_info = await bot.get_file(message.document.file_id)
-                await bot.download_file(file_info.file_path, DATABASE_NAME)
-                logger.info("Database successfully restored from channel backup!")
-                return
-        logger.error("No .db backup files found in the specified channel.")
-    except Exception as e:
-        logger.error(f"Failed to auto-restore database from channel: {e}")
+async def init_db():
+    await users_col.create_index("telegram_id", unique=True)
+    await countries_col.create_index("code", unique=True)
+    await countries_col.create_index("id", unique=True)
+    await products_col.create_index("product_id", unique=True)
+    await orders_col.create_index("order_id", unique=True)
+    await topups_col.create_index("topup_id", unique=True)
 
-async def auto_backup_loop(bot: Bot):
-    """
-    Background worker that runs every 12 hours, sending the active database file
-    to the configured backup channel.
-    """
-    while True:
-        try:
-            # Wait 12 hours between backups (12 hours * 3600 seconds)
-            await asyncio.sleep(12 * 3600)
-            
-            if os.path.exists(DATABASE_NAME):
-                db_file = FSInputFile(DATABASE_NAME)
-                caption = "🔄 <b>Automated 12-Hour Database Backup</b>"
-                await bot.send_document(
-                    chat_id=BACKUP_CHANNEL_ID,
-                    document=db_file,
-                    caption=caption,
-                    parse_mode="HTML"
-                )
-                logger.info("Automated database backup sent to channel successfully.")
-            else:
-                logger.warning("Auto-backup skipped: Database file does not exist.")
-        except asyncio.CancelledError:
-            break
-        except Exception as e:
-            logger.error(f"Error occurring during auto-backup loop: {e}")
+    # Sync countries list to MongoDB
+    idx = 1
+    for code, name, flag in sorted(ALL_COUNTRIES_DATA, key=lambda x: x[1]):
+        await countries_col.update_one(
+            {"code": code},
+            {"$setOnInsert": {"id": idx}, "$set": {"name": name, "flag": flag, "is_enabled": 1}},
+            upsert=True
+        )
+        idx += 1
 
-# --- HELPER FUNCTIONS & DATABASE SETUP ---
+# --- HELPER FUNCTIONS ---
 
 async def get_crypto_price_usd(coin_id: str) -> float:
     if not coin_id or coin_id == "tether":
@@ -106,83 +81,6 @@ async def get_crypto_price_usd(coin_id: str) -> float:
     except Exception as e:
         logger.warning(f"Failed to fetch live price for {coin_id}: {e}. Using fallback.")
     return FALLBACK_PRICES.get(coin_id, 1.0)
-
-async def init_db():
-    async with aiosqlite.connect(DATABASE_NAME) as db:
-        await db.execute("PRAGMA foreign_keys = ON;")
-        
-        await db.execute("""
-            CREATE TABLE IF NOT EXISTS users (
-                telegram_id INTEGER PRIMARY KEY,
-                username TEXT,
-                first_name TEXT,
-                language TEXT DEFAULT NULL,
-                balance REAL DEFAULT 0.0,
-                is_blocked INTEGER DEFAULT 0,
-                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-            )
-        """)
-        
-        await db.execute("""
-            CREATE TABLE IF NOT EXISTS countries (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                code TEXT UNIQUE NOT NULL,
-                name TEXT NOT NULL,
-                flag TEXT NOT NULL,
-                is_enabled INTEGER DEFAULT 1
-            )
-        """)
-        
-        await db.execute("""
-            CREATE TABLE IF NOT EXISTS products (
-                product_id TEXT PRIMARY KEY,
-                seller_id INTEGER DEFAULT 0,
-                type TEXT NOT NULL DEFAULT 'account',
-                country_id INTEGER NOT NULL,
-                price REAL NOT NULL,
-                quality TEXT NOT NULL,
-                bin_link TEXT DEFAULT '',
-                status TEXT DEFAULT 'available',
-                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                FOREIGN KEY (country_id) REFERENCES countries (id) ON DELETE CASCADE
-            )
-        """)
-        
-        await db.execute("""
-            CREATE TABLE IF NOT EXISTS orders (
-                order_id TEXT PRIMARY KEY,
-                user_id INTEGER NOT NULL,
-                product_id TEXT NOT NULL,
-                amount REAL NOT NULL,
-                status TEXT DEFAULT 'completed',
-                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                FOREIGN KEY (user_id) REFERENCES users (telegram_id)
-            )
-        """)
-        
-        await db.execute("""
-            CREATE TABLE IF NOT EXISTS topups (
-                topup_id TEXT PRIMARY KEY,
-                user_id INTEGER NOT NULL,
-                amount REAL NOT NULL,
-                method TEXT NOT NULL,
-                crypto_amount TEXT DEFAULT '0',
-                status TEXT DEFAULT 'pending',
-                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                FOREIGN KEY (user_id) REFERENCES users (telegram_id)
-            )
-        """)
-
-        for code, name, flag in sorted(ALL_COUNTRIES_DATA, key=lambda x: x[1]):
-            await db.execute(
-                "INSERT INTO countries (code, name, flag, is_enabled) VALUES (?, ?, ?, 1) ON CONFLICT(code) DO UPDATE SET name=excluded.name, flag=excluded.flag",
-                (code, name, flag)
-            )
-        
-        await db.commit()
-
-def get_db():
-    return aiosqlite.connect(DATABASE_NAME)
 
 class AddProductFSM(StatesGroup):
     select_country = State()
@@ -200,10 +98,10 @@ def get_main_keyboard(user_id: int, lang: str = "ru") -> InlineKeyboardMarkup:
     t = TEXTS.get(lang, TEXTS["ru"])
     buttons = [
         [
-            InlineKeyboardButton(text=t["btn_buy_account"], callback_data="buy_cat:account:1")
+            InlineKeyboardButton(text=t["btn_buy_account"], callback_data="buy_cat:account:1", style="primary")
         ],
         [
-            InlineKeyboardButton(text=t["btn_topup"], callback_data="wallet_topup")
+            InlineKeyboardButton(text=t["btn_topup"], callback_data="wallet_topup", style="success")
         ],
         [
             InlineKeyboardButton(text=t["btn_orders"], callback_data="my_orders"),
@@ -218,45 +116,46 @@ def get_main_keyboard(user_id: int, lang: str = "ru") -> InlineKeyboardMarkup:
         ]
     ]
     if user_id in ADMIN_IDS:
-        buttons.append([InlineKeyboardButton(text=t["btn_admin"], callback_data="admin_panel")])
+        buttons.append([InlineKeyboardButton(text=t["btn_admin"], callback_data="admin_panel", style="danger")])
     return InlineKeyboardMarkup(inline_keyboard=buttons)
 
 def back_home_buttons(lang: str = "ru") -> List[List[InlineKeyboardButton]]:
     t = TEXTS.get(lang, TEXTS["ru"])
     return [
         [InlineKeyboardButton(text=t["btn_support"], url=DEVELOPER_SUPPORT_LINK)],
-        [InlineKeyboardButton(text=t["btn_home"], callback_data="main_menu")]
+        [InlineKeyboardButton(text=t["btn_home"], callback_data="main_menu", style="primary")]
     ]
 
 router = Router()
 
 async def get_or_create_user(telegram_id: int, username: Optional[str], first_name: Optional[str]) -> dict:
-    async with get_db() as db:
-        db.row_factory = aiosqlite.Row
-        async with db.execute("SELECT * FROM users WHERE telegram_id = ?", (telegram_id,)) as cursor:
-            user = await cursor.fetchone()
-            if not user:
-                await db.execute(
-                    "INSERT INTO users (telegram_id, username, first_name, language) VALUES (?, ?, ?, NULL)",
-                    (telegram_id, username or "N/A", first_name or "User")
-                )
-                await db.commit()
-                async with db.execute("SELECT * FROM users WHERE telegram_id = ?", (telegram_id,)) as c2:
-                    user = await c2.fetchone()
-            return dict(user)
+    user = await users_col.find_one({"telegram_id": telegram_id})
+    if not user:
+        user_data = {
+            "telegram_id": telegram_id,
+            "username": username or "N/A",
+            "first_name": first_name or "User",
+            "language": None,
+            "balance": 0.0,
+            "is_blocked": 0,
+            "created_at": datetime.datetime.utcnow()
+        }
+        await users_col.insert_one(user_data)
+        user = user_data
+    return user
 
 @router.message(CommandStart())
 async def cmd_start(message: Message):
     user = await get_or_create_user(message.from_user.id, message.from_user.username, message.from_user.first_name)
-    if user['is_blocked']:
+    if user.get('is_blocked'):
         await message.answer("❌ <i>Ваш аккаунт заблокирован.</i>", parse_mode="HTML")
         return
 
     if user.get('language') is None:
         kb = InlineKeyboardMarkup(inline_keyboard=[
             [
-                InlineKeyboardButton(text="🇷🇺 Русский", callback_data="first_lang:ru"),
-                InlineKeyboardButton(text="🇬🇧 English", callback_data="first_lang:en")
+                InlineKeyboardButton(text="🇷🇺 Русский", callback_data="first_lang:ru", style="primary"),
+                InlineKeyboardButton(text="🇬🇧 English", callback_data="first_lang:en", style="primary")
             ]
         ])
         await message.answer(TEXTS["ru"]["first_time_prompt"], reply_markup=kb, parse_mode="HTML")
@@ -271,30 +170,11 @@ async def cmd_start(message: Message):
     )
     await message.answer(text, reply_markup=get_main_keyboard(message.from_user.id, lang), parse_mode="HTML")
 
-@router.message(Command("export_db"))
-async def cmd_export_db(message: Message):
-    if message.from_user.id not in ADMIN_IDS:
-        return
-    if os.path.exists(DATABASE_NAME):
-        db_file = FSInputFile(DATABASE_NAME)
-        await message.answer_document(db_file, caption="📂 <b>Database Backup Exported</b>", parse_mode="HTML")
-    else:
-        await message.answer("❌ Database file not found.")
-
 @router.message(F.document, F.from_user.id.in_(ADMIN_IDS))
 async def process_admin_document_import(message: Message, state: FSMContext):
     file_name = message.document.file_name.lower()
-    
-    # Handle Database File Import (.db)
-    if file_name.endswith(".db"):
-        file_id = message.document.file_id
-        file_info = await message.bot.get_file(file_id)
-        await message.bot.download_file(file_info.file_path, DATABASE_NAME)
-        await message.answer("✅ <b>Database file imported successfully!</b>", parse_mode="HTML")
-        return
-
-    # Handle Stock Text File Import (.txt)
     current_state = await state.get_state()
+    
     if file_name.endswith(".txt") and current_state == AddProductFSM.enter_content.state:
         file_id = message.document.file_id
         file_info = await message.bot.get_file(file_id)
@@ -310,30 +190,33 @@ async def process_admin_document_import(message: Message, state: FSMContext):
         admin_id = message.from_user.id
         added_count = 0
 
-        async with get_db() as db:
-            for item in lines:
-                prod_id = item.upper()
-                try:
-                    await db.execute("""
-                        INSERT INTO products (product_id, seller_id, type, country_id, price, quality, bin_link, status)
-                        VALUES (?, ?, 'account', ?, ?, ?, '', 'available')
-                        ON CONFLICT(product_id) DO UPDATE SET
-                            seller_id=excluded.seller_id,
-                            price=excluded.price,
-                            quality=excluded.quality,
-                            status='available'
-                    """, (prod_id, admin_id, data['country_id'], data['price'], data['quality']))
-                    added_count += 1
-                except Exception as e:
-                    logger.error(f"Failed to add item '{item}': {e}")
-
-            await db.commit()
+        for item in lines:
+            prod_id = item.upper()
+            try:
+                await products_col.update_one(
+                    {"product_id": prod_id},
+                    {"$set": {
+                        "product_id": prod_id,
+                        "seller_id": admin_id,
+                        "type": "account",
+                        "country_id": data['country_id'],
+                        "price": data['price'],
+                        "quality": data['quality'],
+                        "bin_link": "",
+                        "status": "available",
+                        "created_at": datetime.datetime.utcnow()
+                    }},
+                    upsert=True
+                )
+                added_count += 1
+            except Exception as e:
+                logger.error(f"Failed to add item '{item}': {e}")
 
         current_total = data.get('uploaded_total', 0) + added_count
         await state.update_data(uploaded_total=current_total)
 
         exit_kb = InlineKeyboardMarkup(inline_keyboard=[
-            [InlineKeyboardButton(text="🛑 Finish / Exit Upload Mode", callback_data="exit_upload")]
+            [InlineKeyboardButton(text="🛑 Finish / Exit Upload Mode", callback_data="exit_upload", style="danger")]
         ])
 
         await message.answer(
@@ -349,10 +232,7 @@ async def cb_first_lang_selection(callback: CallbackQuery):
     lang = callback.data.split(":")[1]
     user_id = callback.from_user.id
 
-    async with get_db() as db:
-        await db.execute("UPDATE users SET language = ? WHERE telegram_id = ?", (lang, user_id))
-        await db.commit()
-
+    await users_col.update_one({"telegram_id": user_id}, {"$set": {"language": lang}})
     user = await get_or_create_user(user_id, callback.from_user.username, callback.from_user.first_name)
     t = TEXTS[lang]
     text = t["welcome"].format(
@@ -366,8 +246,8 @@ async def cb_first_lang_selection(callback: CallbackQuery):
 async def cb_switch_language_menu(callback: CallbackQuery):
     kb = InlineKeyboardMarkup(inline_keyboard=[
         [
-            InlineKeyboardButton(text="🇷🇺 Русский", callback_data="set_lang:ru"),
-            InlineKeyboardButton(text="🇬🇧 English", callback_data="set_lang:en")
+            InlineKeyboardButton(text="🇷🇺 Русский", callback_data="set_lang:ru", style="primary"),
+            InlineKeyboardButton(text="🇬🇧 English", callback_data="set_lang:en", style="primary")
         ],
         [InlineKeyboardButton(text="⬅️ Back / Назад", callback_data="main_menu")]
     ])
@@ -378,10 +258,7 @@ async def cb_set_language(callback: CallbackQuery):
     lang = callback.data.split(":")[1]
     user_id = callback.from_user.id
 
-    async with get_db() as db:
-        await db.execute("UPDATE users SET language = ? WHERE telegram_id = ?", (lang, user_id))
-        await db.commit()
-
+    await users_col.update_one({"telegram_id": user_id}, {"$set": {"language": lang}})
     user = await get_or_create_user(user_id, callback.from_user.username, callback.from_user.first_name)
     t = TEXTS[lang]
     text = t["welcome"].format(
@@ -416,46 +293,31 @@ async def cb_select_category(callback: CallbackQuery):
     lang = user.get('language') or 'ru'
     t = TEXTS[lang]
 
-    async with get_db() as db:
-        db.row_factory = aiosqlite.Row
-        async with db.execute("SELECT COUNT(*) FROM countries WHERE is_enabled = 1") as total_cur:
-            total_countries = (await total_cur.fetchone())[0]
+    total_countries = await countries_col.count_documents({"is_enabled": 1})
+    total_pages = max(1, (total_countries + per_page - 1) // per_page)
+    offset = (page - 1) * per_page
 
-        total_pages = max(1, (total_countries + per_page - 1) // per_page)
-        offset = (page - 1) * per_page
+    cursor = countries_col.find({"is_enabled": 1}).sort("name", 1).skip(offset).limit(per_page)
+    countries = await cursor.to_list(length=per_page)
 
-        async with db.execute(
-            "SELECT * FROM countries WHERE is_enabled = 1 ORDER BY name ASC LIMIT ? OFFSET ?",
-            (per_page, offset)
-        ) as cursor:
-            countries = await cursor.fetchall()
+    buttons = []
+    for i in range(0, len(countries), 2):
+        row_btns = []
+        c1 = countries[i]
+        st1 = await products_col.count_documents({"country_id": c1['id'], "status": "available"})
+        row_btns.append(InlineKeyboardButton(
+            text=f"{c1['flag']} {c1['name'].split(' (')[0]} [{st1}]",
+            callback_data=f"buy_country:{p_type}:{c1['id']}:{page}"
+        ))
 
-        buttons = []
-        for i in range(0, len(countries), 2):
-            row_btns = []
-            c1 = countries[i]
-            async with db.execute(
-                "SELECT COUNT(*) FROM products WHERE country_id = ? AND status = 'available'",
-                (c1['id'],)
-            ) as count_cur:
-                st1 = (await count_cur.fetchone())[0]
+        if i + 1 < len(countries):
+            c2 = countries[i + 1]
+            st2 = await products_col.count_documents({"country_id": c2['id'], "status": "available"})
             row_btns.append(InlineKeyboardButton(
-                text=f"{c1['flag']} {c1['name'].split(' (')[0]} [{st1}]",
-                callback_data=f"buy_country:{p_type}:{c1['id']}:{page}"
+                text=f"{c2['flag']} {c2['name'].split(' (')[0]} [{st2}]",
+                callback_data=f"buy_country:{p_type}:{c2['id']}:{page}"
             ))
-
-            if i + 1 < len(countries):
-                c2 = countries[i + 1]
-                async with db.execute(
-                    "SELECT COUNT(*) FROM products WHERE country_id = ? AND status = 'available'",
-                    (c2['id'],)
-                ) as count_cur2:
-                    st2 = (await count_cur2.fetchone())[0]
-                row_btns.append(InlineKeyboardButton(
-                    text=f"{c2['flag']} {c2['name'].split(' (')[0]} [{st2}]",
-                    callback_data=f"buy_country:{p_type}:{c2['id']}:{page}"
-                ))
-            buttons.append(row_btns)
+        buttons.append(row_btns)
 
     nav_buttons = []
     if page > 1:
@@ -481,29 +343,25 @@ async def cb_select_quality_grade(callback: CallbackQuery):
     lang = user.get('language') or 'ru'
     t = TEXTS[lang]
 
-    async with get_db() as db:
-        db.row_factory = aiosqlite.Row
-        async with db.execute("SELECT * FROM countries WHERE id = ?", (country_id,)) as c_cur:
-            country = await c_cur.fetchone()
+    country = await countries_col.find_one({"id": country_id})
+    fresh_label = t["fresh_acc_label"]
+    broken_label = t["broken_acc_label"]
 
-        fresh_label = t["fresh_acc_label"]
-        broken_label = t["broken_acc_label"]
+    fresh_count = await products_col.count_documents({
+        "country_id": country_id,
+        "quality": {"$regex": "Spam-Free", "$options": "i"},
+        "status": "available"
+    })
 
-        async with db.execute(
-            "SELECT COUNT(*) FROM products WHERE country_id = ? AND quality LIKE '%Spam-Free%' AND status = 'available'",
-            (country_id,)
-        ) as f_cur:
-            fresh_count = (await f_cur.fetchone())[0]
-
-        async with db.execute(
-            "SELECT COUNT(*) FROM products WHERE country_id = ? AND quality NOT LIKE '%Spam-Free%' AND status = 'available'",
-            (country_id,)
-        ) as b_cur:
-            broken_count = (await b_cur.fetchone())[0]
+    broken_count = await products_col.count_documents({
+        "country_id": country_id,
+        "quality": {"$not": {"$regex": "Spam-Free", "$options": "i"}},
+        "status": "available"
+    })
 
     buttons = [
-        [InlineKeyboardButton(text=f"{fresh_label} [{fresh_count}]", callback_data=f"list_prods:{p_type}:{country_id}:fresh:1:{back_page}")],
-        [InlineKeyboardButton(text=f"{broken_label} [{broken_count}]", callback_data=f"list_prods:{p_type}:{country_id}:broken:1:{back_page}")],
+        [InlineKeyboardButton(text=f"{fresh_label} [{fresh_count}]", callback_data=f"list_prods:{p_type}:{country_id}:fresh:1:{back_page}", style="success")],
+        [InlineKeyboardButton(text=f"{broken_label} [{broken_count}]", callback_data=f"list_prods:{p_type}:{country_id}:broken:1:{back_page}", style="danger")],
         [InlineKeyboardButton(text=t["btn_back"], callback_data=f"buy_cat:{p_type}:{back_page}")]
     ]
     
@@ -523,30 +381,25 @@ async def cb_list_products(callback: CallbackQuery):
     lang = user.get('language') or 'ru'
     t = TEXTS[lang]
 
-    quality_like = "%Spam-Free%" if grade == "fresh" else "%Spam%"
+    query = {"country_id": country_id, "status": "available"}
+    if grade == "fresh":
+        query["quality"] = {"$regex": "Spam-Free", "$options": "i"}
+    else:
+        query["quality"] = {"$not": {"$regex": "Spam-Free", "$options": "i"}}
 
-    async with get_db() as db:
-        db.row_factory = aiosqlite.Row
-        async with db.execute(
-            "SELECT COUNT(*) FROM products WHERE country_id = ? AND quality LIKE ? AND status = 'available'",
-            (country_id, quality_like)
-        ) as count_cur:
-            total_items = (await count_cur.fetchone())[0]
+    total_items = await products_col.count_documents(query)
 
-        if total_items == 0:
-            kb = InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text=t["btn_back"], callback_data=f"buy_country:{p_type}:{country_id}:{back_page}")]])
-            await callback.message.edit_text(t["out_of_stock"], reply_markup=kb, parse_mode="HTML")
-            return
+    if total_items == 0:
+        kb = InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text=t["btn_back"], callback_data=f"buy_country:{p_type}:{country_id}:{back_page}")]])
+        await callback.message.edit_text(t["out_of_stock"], reply_markup=kb, parse_mode="HTML")
+        return
 
-        per_page = 5
-        total_pages = max(1, (total_items + per_page - 1) // per_page)
-        offset = (prod_page - 1) * per_page
+    per_page = 5
+    total_pages = max(1, (total_items + per_page - 1) // per_page)
+    offset = (prod_page - 1) * per_page
 
-        async with db.execute(
-            "SELECT * FROM products WHERE country_id = ? AND quality LIKE ? AND status = 'available' LIMIT ? OFFSET ?",
-            (country_id, quality_like, per_page, offset)
-        ) as cursor:
-            products = await cursor.fetchall()
+    cursor = products_col.find(query).skip(offset).limit(per_page)
+    products = await cursor.to_list(length=per_page)
 
     text = t["catalog_title"]
     buttons = []
@@ -556,7 +409,8 @@ async def cb_list_products(callback: CallbackQuery):
         text += f"🔹 <b>ID:</b> <code>{html.escape(p['product_id'])}</code> — Price: <b>${p['price']:.2f}</b>\n"
         buttons.append([InlineKeyboardButton(
             text=f"🛒 Buy {p['product_id']} (${p['price']:.2f})",
-            callback_data=f"exec_buy:{p['product_id']}"
+            callback_data=f"exec_buy:{p['product_id']}",
+            style="success"
         )])
 
     nav_buttons = []
@@ -579,50 +433,40 @@ async def cb_execute_buy_fresh(callback: CallbackQuery):
     lang = user.get('language') or 'ru'
     t = TEXTS[lang]
 
-    async with get_db() as db:
-        db.row_factory = aiosqlite.Row
-        try:
-            await db.execute("BEGIN IMMEDIATE")
-            
-            async with db.execute("SELECT balance FROM users WHERE telegram_id = ?", (user_id,)) as u_cur:
-                u_row = await u_cur.fetchone()
-            
-            async with db.execute("SELECT * FROM products WHERE product_id = ? AND status = 'available'", (prod_id,)) as p_cur:
-                p = await p_cur.fetchone()
+    async with await mongo_client.start_session() as session:
+        async with session.start_transaction():
+            u_doc = await users_col.find_one({"telegram_id": user_id}, session=session)
+            p_doc = await products_col.find_one({"product_id": prod_id, "status": "available"}, session=session)
 
-            if not p:
-                await db.execute("ROLLBACK")
+            if not p_doc:
                 await callback.answer("❌ Account already sold!", show_alert=True)
                 return
 
-            if u_row['balance'] < p['price']:
-                await db.execute("ROLLBACK")
-                await callback.answer(t["insufficient_funds"].format(price=p['price']), show_alert=True)
+            if u_doc['balance'] < p_doc['price']:
+                await callback.answer(t["insufficient_funds"].format(price=p_doc['price']), show_alert=True)
                 return
 
-            new_balance = u_row['balance'] - p['price']
-            await db.execute("UPDATE users SET balance = ? WHERE telegram_id = ?", (new_balance, user_id))
-            await db.execute("UPDATE products SET status = 'sold' WHERE product_id = ?", (prod_id,))
+            new_balance = u_doc['balance'] - p_doc['price']
+            await users_col.update_one({"telegram_id": user_id}, {"$set": {"balance": new_balance}}, session=session)
+            await products_col.update_one({"product_id": prod_id}, {"$set": {"status": "sold"}}, session=session)
 
             order_id = f"ORD-{random.randint(100000, 999999)}"
-            await db.execute(
-                "INSERT INTO orders (order_id, user_id, product_id, amount, status) VALUES (?, ?, ?, ?, ?)",
-                (order_id, user_id, prod_id, p['price'], "completed")
-            )
-            await db.commit()
+            await orders_col.insert_one({
+                "order_id": order_id,
+                "user_id": user_id,
+                "product_id": prod_id,
+                "amount": p_doc['price'],
+                "status": "completed",
+                "created_at": datetime.datetime.utcnow()
+            }, session=session)
 
             text = t["purchase_success"].format(
                 order_id=order_id,
                 prod_id=html.escape(prod_id),
-                price=p['price'],
+                price=p_doc['price'],
                 balance=new_balance
             )
             await callback.message.edit_text(text, reply_markup=InlineKeyboardMarkup(inline_keyboard=back_home_buttons(lang)), parse_mode="HTML")
-
-        except Exception as e:
-            await db.execute("ROLLBACK")
-            logger.error(f"Purchase Error: {e}")
-            await callback.answer("❌ Purchase failed.", show_alert=True)
 
 @router.callback_query(F.data == "wallet_topup")
 async def cb_wallet_topup_start(callback: CallbackQuery, state: FSMContext):
@@ -635,12 +479,12 @@ async def cb_wallet_topup_start(callback: CallbackQuery, state: FSMContext):
     
     buttons = [
         [
-            InlineKeyboardButton(text="USDT (BEP-20)", callback_data="dep_method:usdt_bep20"),
-            InlineKeyboardButton(text="USDT (ERC-20)", callback_data="dep_method:usdt_erc20")
+            InlineKeyboardButton(text="USDT (BEP-20)", callback_data="dep_method:usdt_bep20", style="primary"),
+            InlineKeyboardButton(text="USDT (ERC-20)", callback_data="dep_method:usdt_erc20", style="primary")
         ],
         [
-            InlineKeyboardButton(text="USDT (Polygon)", callback_data="dep_method:usdt_poly"),
-            InlineKeyboardButton(text="USDT (TON)", callback_data="dep_method:usdt_ton")
+            InlineKeyboardButton(text="USDT (Polygon)", callback_data="dep_method:usdt_poly", style="primary"),
+            InlineKeyboardButton(text="USDT (TON)", callback_data="dep_method:usdt_ton", style="primary")
         ],
         [InlineKeyboardButton(text=t["btn_support"], url=DEVELOPER_SUPPORT_LINK)],
         [InlineKeyboardButton(text=t["btn_home"], callback_data="main_menu")]
@@ -673,7 +517,7 @@ async def cb_topup_select_amount(callback: CallbackQuery, state: FSMContext):
             InlineKeyboardButton(text="$15.00", callback_data="dep_amt:15.0"),
             InlineKeyboardButton(text="$25.00", callback_data="dep_amt:25.0")
         ],
-        [InlineKeyboardButton(text="✏️ Custom Amount / Своя сумма USD", callback_data="dep_amt:custom")],
+        [InlineKeyboardButton(text="✏️ Custom Amount / Своя сумма USD", callback_data="dep_amt:custom", style="primary")],
         [InlineKeyboardButton(text=t["btn_back"], callback_data="wallet_topup")]
     ]
 
@@ -741,7 +585,7 @@ async def generate_invoice(event: CallbackQuery | Message, state: FSMContext, am
     buttons = [
         [InlineKeyboardButton(text="📋 Copy Address / Скопировать адрес", callback_data=f"copy_addr:{method_key}")],
         [InlineKeyboardButton(text=f"📋 Copy Amount / Скопировать · {coin_amount}", callback_data=f"copy_amt:{coin_amount}")],
-        [InlineKeyboardButton(text="✅ I Have Paid / Я оплатил", callback_data=f"topup_paid:{invoice_code}")],
+        [InlineKeyboardButton(text="✅ I Have Paid / Я оплатил", callback_data=f"topup_paid:{invoice_code}", style="success")],
         [InlineKeyboardButton(text="💬 Support", url=DEVELOPER_SUPPORT_LINK)],
         [InlineKeyboardButton(text="Back / Назад", callback_data="wallet_topup")]
     ]
@@ -785,17 +629,20 @@ async def process_proof_upload(message: Message, state: FSMContext):
     lang = user.get('language') or 'ru'
     t = TEXTS[lang]
 
-    async with get_db() as db:
-        await db.execute(
-            "INSERT INTO topups (topup_id, user_id, amount, method, crypto_amount, status) VALUES (?, ?, ?, ?, ?, 'pending')",
-            (invoice_code, message.from_user.id, amount, method_name, crypto_amount)
-        )
-        await db.commit()
+    await topups_col.insert_one({
+        "topup_id": invoice_code,
+        "user_id": message.from_user.id,
+        "amount": amount,
+        "method": method_name,
+        "crypto_amount": crypto_amount,
+        "status": "pending",
+        "created_at": datetime.datetime.utcnow()
+    })
 
     admin_kb = InlineKeyboardMarkup(inline_keyboard=[
         [
-            InlineKeyboardButton(text="✅ Approve", callback_data=f"adm_appr_topup:{invoice_code}"),
-            InlineKeyboardButton(text="❌ Reject", callback_data=f"adm_rej_topup:{invoice_code}")
+            InlineKeyboardButton(text="✅ Approve", callback_data=f"adm_appr_topup:{invoice_code}", style="success"),
+            InlineKeyboardButton(text="❌ Reject", callback_data=f"adm_rej_topup:{invoice_code}", style="danger")
         ]
     ])
 
@@ -823,19 +670,14 @@ async def cb_admin_approve_topup(callback: CallbackQuery):
     if callback.from_user.id not in ADMIN_IDS: return
     topup_id = callback.data.split(":")[1]
 
-    async with get_db() as db:
-        db.row_factory = aiosqlite.Row
-        async with db.execute("SELECT * FROM topups WHERE topup_id = ? AND status = 'pending'", (topup_id,)) as c:
-            topup = await c.fetchone()
-
-        if topup:
-            await db.execute("UPDATE topups SET status = 'approved' WHERE topup_id = ?", (topup_id,))
-            await db.execute("UPDATE users SET balance = balance + ? WHERE telegram_id = ?", (topup['amount'], topup['user_id']))
-            await db.commit()
-            try:
-                await callback.bot.send_message(topup['user_id'], f"🎉 <b>Deposit Approved! / Депозит одобрен!</b>\n\n<code>${topup['amount']:.2f} USD</code> credited to your wallet.", parse_mode="HTML")
-            except Exception:
-                pass
+    topup = await topups_col.find_one({"topup_id": topup_id, "status": "pending"})
+    if topup:
+        await topups_col.update_one({"topup_id": topup_id}, {"$set": {"status": "approved"}})
+        await users_col.update_one({"telegram_id": topup['user_id']}, {"$inc": {"balance": topup['amount']}})
+        try:
+            await callback.bot.send_message(topup['user_id'], f"🎉 <b>Deposit Approved! / Депозит одобрен!</b>\n\n<code>${topup['amount']:.2f} USD</code> credited to your wallet.", parse_mode="HTML")
+        except Exception:
+            pass
 
     await callback.message.edit_caption(caption=f"{callback.message.caption}\n\n✅ <b>APPROVED BY ADMIN</b>", parse_mode="HTML")
 
@@ -844,46 +686,125 @@ async def cb_admin_reject_topup(callback: CallbackQuery):
     if callback.from_user.id not in ADMIN_IDS: return
     topup_id = callback.data.split(":")[1]
 
-    async with get_db() as db:
-        db.row_factory = aiosqlite.Row
-        async with db.execute("SELECT * FROM topups WHERE topup_id = ? AND status = 'pending'", (topup_id,)) as c:
-            topup = await c.fetchone()
-
-        if topup:
-            await db.execute("UPDATE topups SET status = 'rejected' WHERE topup_id = ?", (topup_id,))
-            await db.commit()
-            try:
-                await callback.bot.send_message(topup['user_id'], f"❌ Top-up request for <b>${topup['amount']:.2f} USD</b> rejected.", parse_mode="HTML")
-            except Exception:
-                pass
+    topup = await topups_col.find_one({"topup_id": topup_id, "status": "pending"})
+    if topup:
+        await topups_col.update_one({"topup_id": topup_id}, {"$set": {"status": "rejected"}})
+        try:
+            await callback.bot.send_message(topup['user_id'], f"❌ Top-up request for <b>${topup['amount']:.2f} USD</b> rejected.", parse_mode="HTML")
+        except Exception:
+            pass
 
     await callback.message.edit_caption(caption=f"{callback.message.caption}\n\n❌ <b>REJECTED BY ADMIN</b>", parse_mode="HTML")
+
+# --- ADMIN PANEL AND STORAGE MANAGEMENT ---
 
 @router.callback_query(F.data == "admin_panel")
 async def cb_admin_panel(callback: CallbackQuery):
     if callback.from_user.id not in ADMIN_IDS: return
     
     kb = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="➕ Bulk Add Account Stock", callback_data="admin_add_prod")],
+        [
+            InlineKeyboardButton(text="🟢 Green Button", callback_data="btn_green", style="success"),
+            InlineKeyboardButton(text="🔴 Red Button", callback_data="btn_red", style="danger")
+        ],
+        [
+            InlineKeyboardButton(text="🔵 Blue Button", callback_data="btn_blue", style="primary")
+        ],
+        [InlineKeyboardButton(text="➕ Bulk Add Account Stock", callback_data="admin_add_prod", style="success")],
         [InlineKeyboardButton(text="📤 Export Full Stock (.txt)", callback_data="admin_export_txt")],
-        [InlineKeyboardButton(text="📥 Export Database (/export_db)", callback_data="admin_export_db")],
+        [InlineKeyboardButton(text="📊 Check Storage Usage", callback_data="admin_check_storage", style="primary")],
+        [InlineKeyboardButton(text="⚠️ Delete All Database", callback_data="admin_clear_db_confirm", style="danger")],
         [InlineKeyboardButton(text="🏠 Main Menu", callback_data="main_menu")]
     ])
-    await callback.message.edit_text("👨‍💻 <b>ADMIN CONTROL PANEL</b>\n\nSelect operation mode:\n\n<i>Send a `.db` file to import DB or send a `.txt` file during upload mode to import stock.</i>", reply_markup=kb, parse_mode="HTML")
+    await callback.message.edit_text("👨‍💻 <b>ADMIN CONTROL PANEL</b>\n\nSelect operation mode:\n\n<i>Send a `.txt` file during upload mode to import stock.</i>", reply_markup=kb, parse_mode="HTML")
+
+@router.callback_query(F.data == "admin_check_storage")
+async def cb_admin_check_storage(callback: CallbackQuery):
+    if callback.from_user.id not in ADMIN_IDS: return
+
+    try:
+        stats = await db.command("dbStats")
+        data_size_mb = stats.get("dataSize", 0) / (1024 * 1024)
+        storage_size_mb = stats.get("storageSize", 0) / (1024 * 1024)
+        index_size_mb = stats.get("indexSize", 0) / (1024 * 1024)
+        
+        # Free MongoDB Tier usually cap at 512 MB
+        max_storage_mb = 512.0
+        available_mb = max(0.0, max_storage_mb - storage_size_mb)
+
+        text = (
+            f"📊 <b>MONGODB STORAGE STATISTICS</b>\n"
+            f"═══════════════════════\n\n"
+            f"💾 <b>Data Size:</b> <code>{data_size_mb:.2f} MB</code>\n"
+            f"📦 <b>Storage Used:</b> <code>{storage_size_mb:.2f} MB</code>\n"
+            f"🗂️ <b>Indexes Size:</b> <code>{index_size_mb:.2f} MB</code>\n"
+            f"🟢 <b>Available Space:</b> <code>{available_mb:.2f} MB</code> / {max_storage_mb:.0f} MB\n"
+            f"📑 <b>Total Collections:</b> <code>{stats.get('collections', 0)}</code>"
+        )
+    except Exception as e:
+        text = f"❌ <b>Error fetching storage stats:</b>\n<code>{e}</code>"
+
+    kb = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="⬅️ Back to Admin Panel", callback_data="admin_panel")]
+    ])
+    await callback.message.edit_text(text, reply_markup=kb, parse_mode="HTML")
+
+@router.callback_query(F.data == "admin_clear_db_confirm")
+async def cb_admin_clear_db_confirm(callback: CallbackQuery):
+    if callback.from_user.id not in ADMIN_IDS: return
+
+    kb = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="⚠️ YES, DELETE ENTIRE DB ⚠️", callback_data="admin_clear_db_execute", style="danger")],
+        [InlineKeyboardButton(text="❌ CANCEL", callback_data="admin_panel", style="primary")]
+    ])
+    await callback.message.edit_text(
+        "🚨 <b>WARNING: DELETE ALL DATABASE DATA</b> 🚨\n\n"
+        "Are you sure you want to completely clear the entire MongoDB database?\n"
+        "<i>This action will delete all user accounts, orders, deposits, and stock.</i>",
+        reply_markup=kb,
+        parse_mode="HTML"
+    )
+
+@router.callback_query(F.data == "admin_clear_db_execute")
+async def cb_admin_clear_db_execute(callback: CallbackQuery):
+    if callback.from_user.id not in ADMIN_IDS: return
+
+    await users_col.delete_many({})
+    await products_col.delete_many({})
+    await orders_col.delete_many({})
+    await topups_col.delete_many({})
+    await countries_col.delete_many({})
+
+    # Re-initialize countries and indexes
+    await init_db()
+
+    kb = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="🏠 Main Menu", callback_data="main_menu", style="primary")]
+    ])
+    await callback.message.edit_text("💥 <b>DATABASE CLEARED SUCCESSFULLY!</b>\n\nAll MongoDB collections have been reset.", reply_markup=kb, parse_mode="HTML")
+
+@router.callback_query(F.data.in_(["btn_green", "btn_red", "btn_blue"]))
+async def cb_colored_buttons_demo(callback: CallbackQuery):
+    btn = callback.data
+    await callback.answer(f"You clicked on styled button: {btn}", show_alert=True)
 
 @router.callback_query(F.data == "admin_export_txt")
 async def cb_admin_export_txt(callback: CallbackQuery):
     if callback.from_user.id not in ADMIN_IDS: return
 
-    async with get_db() as db:
-        db.row_factory = aiosqlite.Row
-        async with db.execute("""
-            SELECT c.name as country_name, c.flag, p.product_id, p.price, p.quality, p.status 
-            FROM products p
-            JOIN countries c ON p.country_id = c.id
-            ORDER BY c.name ASC, p.quality ASC
-        """) as cursor:
-            products = await cursor.fetchall()
+    pipeline = [
+        {
+            "$lookup": {
+                "from": "countries",
+                "localField": "country_id",
+                "foreignField": "id",
+                "as": "country_info"
+            }
+        },
+        {"$unwind": "$country_info"},
+        {"$sort": {"country_info.name": 1, "quality": 1}}
+    ]
+    products = await products_col.aggregate(pipeline).to_list(length=None)
 
     if not products:
         await callback.answer("❌ No stock/products available to export.", show_alert=True)
@@ -893,9 +814,11 @@ async def cb_admin_export_txt(callback: CallbackQuery):
     current_country = ""
 
     for p in products:
-        if p['country_name'] != current_country:
-            current_country = p['country_name']
-            output_lines.append(f"\n--- {p['flag']} {current_country.upper()} ---")
+        c_name = p['country_info']['name']
+        flag = p['country_info']['flag']
+        if c_name != current_country:
+            current_country = c_name
+            output_lines.append(f"\n--- {flag} {current_country.upper()} ---")
         
         output_lines.append(f"ID: {p['product_id']} | Quality: {p['quality']} | Price: ${p['price']:.2f} | Status: {p['status']}")
 
@@ -908,16 +831,6 @@ async def cb_admin_export_txt(callback: CallbackQuery):
         parse_mode="HTML"
     )
     await callback.answer("Exported!")
-
-@router.callback_query(F.data == "admin_export_db")
-async def cb_admin_export_db(callback: CallbackQuery):
-    if callback.from_user.id not in ADMIN_IDS: return
-    if os.path.exists(DATABASE_NAME):
-        db_file = FSInputFile(DATABASE_NAME)
-        await callback.message.answer_document(db_file, caption="📂 <b>Database Backup Exported</b>", parse_mode="HTML")
-        await callback.answer("Database sent!")
-    else:
-        await callback.answer("❌ Database file not found.", show_alert=True)
 
 @router.callback_query(F.data == "admin_add_prod")
 async def cb_start_add_item(callback: CallbackQuery, state: FSMContext):
@@ -933,16 +846,12 @@ async def cb_admin_country_page(callback: CallbackQuery, state: FSMContext):
 
 async def render_admin_country_selection(callback: CallbackQuery, state: FSMContext, page: int = 1):
     per_page = 20
-    async with get_db() as db:
-        db.row_factory = aiosqlite.Row
-        async with db.execute("SELECT COUNT(*) FROM countries WHERE is_enabled = 1") as total_cur:
-            total_countries = (await total_cur.fetchone())[0]
+    total_countries = await countries_col.count_documents({"is_enabled": 1})
+    total_pages = max(1, (total_countries + per_page - 1) // per_page)
+    offset = (page - 1) * per_page
 
-        total_pages = max(1, (total_countries + per_page - 1) // per_page)
-        offset = (page - 1) * per_page
-
-        async with db.execute("SELECT * FROM countries WHERE is_enabled = 1 ORDER BY name ASC LIMIT ? OFFSET ?", (per_page, offset)) as cursor:
-            countries = await cursor.fetchall()
+    cursor = countries_col.find({"is_enabled": 1}).sort("name", 1).skip(offset).limit(per_page)
+    countries = await cursor.to_list(length=per_page)
 
     buttons = []
     for i in range(0, len(countries), 2):
@@ -968,8 +877,8 @@ async def cb_item_country(callback: CallbackQuery, state: FSMContext):
     await state.update_data(country_id=c_id)
 
     qual_buttons = [
-        [InlineKeyboardButton(text="🟢 Spam-Free Account", callback_data="qual:Spam-Free Account")],
-        [InlineKeyboardButton(text="🔴 Spam Account", callback_data="qual:Spam Account")]
+        [InlineKeyboardButton(text="🟢 Spam-Free Account", callback_data="qual:Spam-Free Account", style="success")],
+        [InlineKeyboardButton(text="🔴 Spam Account", callback_data="qual:Spam Account", style="danger")]
     ]
 
     await state.set_state(AddProductFSM.select_quality)
@@ -995,7 +904,7 @@ async def process_item_price(message: Message, state: FSMContext):
     await state.set_state(AddProductFSM.enter_content)
     
     exit_kb = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="🛑 Finish / Exit Upload Mode", callback_data="exit_upload")]
+        [InlineKeyboardButton(text="🛑 Finish / Exit Upload Mode", callback_data="exit_upload", style="danger")]
     ])
 
     await message.answer(
@@ -1019,32 +928,34 @@ async def process_item_content(message: Message, state: FSMContext):
     added_count = 0
     admin_id = message.from_user.id
 
-    async with get_db() as db:
-        for item in lines:
-            prod_id = item.upper()
-            try:
-                await db.execute("""
-                    INSERT INTO products (product_id, seller_id, type, country_id, price, quality, bin_link, status)
-                    VALUES (?, ?, 'account', ?, ?, ?, '', 'available')
-                    ON CONFLICT(product_id) DO UPDATE SET
-                        seller_id=excluded.seller_id,
-                        price=excluded.price,
-                        quality=excluded.quality,
-                        status='available'
-                """, (prod_id, admin_id, data['country_id'], data['price'], data['quality']))
-                
-                added_count += 1
-            except Exception as e:
-                logger.error(f"Failed to add account '{item}': {e}")
-                continue
-
-        await db.commit()
+    for item in lines:
+        prod_id = item.upper()
+        try:
+            await products_col.update_one(
+                {"product_id": prod_id},
+                {"$set": {
+                    "product_id": prod_id,
+                    "seller_id": admin_id,
+                    "type": "account",
+                    "country_id": data['country_id'],
+                    "price": data['price'],
+                    "quality": data['quality'],
+                    "bin_link": "",
+                    "status": "available",
+                    "created_at": datetime.datetime.utcnow()
+                }},
+                upsert=True
+            )
+            added_count += 1
+        except Exception as e:
+            logger.error(f"Failed to add account '{item}': {e}")
+            continue
 
     current_total = data.get('uploaded_total', 0) + added_count
     await state.update_data(uploaded_total=current_total)
 
     exit_kb = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="🛑 Finish / Exit Upload Mode", callback_data="exit_upload")]
+        [InlineKeyboardButton(text="🛑 Finish / Exit Upload Mode", callback_data="exit_upload", style="danger")]
     ])
 
     await message.answer(
@@ -1074,11 +985,14 @@ async def cb_my_profile(callback: CallbackQuery):
     lang = user.get('language') or 'ru'
     t = TEXTS[lang]
 
-    async with get_db() as db:
-        async with db.execute("SELECT COUNT(*), SUM(amount) FROM orders WHERE user_id = ?", (user['telegram_id'],)) as c:
-            row = await c.fetchone()
-            total_orders = row[0] if row and row[0] is not None else 0
-            total_spent = row[1] if row and row[1] is not None else 0.0
+    pipeline = [
+        {"$match": {"user_id": user['telegram_id']}},
+        {"$group": {"_id": None, "total_orders": {"$sum": 1}, "total_spent": {"$sum": "$amount"}}}
+    ]
+    res = await orders_col.aggregate(pipeline).to_list(length=1)
+    
+    total_orders = res[0]['total_orders'] if res else 0
+    total_spent = res[0]['total_spent'] if res else 0.0
 
     username_str = f"@{html.escape(user['username'])}" if user['username'] and user['username'] != "N/A" else "None"
     
@@ -1099,27 +1013,19 @@ async def cb_my_orders(callback: CallbackQuery):
     lang = user.get('language') or 'ru'
     t = TEXTS[lang]
 
-    async with get_db() as db:
-        db.row_factory = aiosqlite.Row
-        async with db.execute("""
-            SELECT o.order_id, o.amount, o.created_at, 
-                   COALESCE(p.quality, 'Standard Account') as quality, 
-                   o.product_id
-            FROM orders o 
-            LEFT JOIN products p ON o.product_id = p.product_id 
-            WHERE o.user_id = ? 
-            ORDER BY o.created_at DESC LIMIT 5
-        """, (user_id,)) as cursor:
-            orders = await cursor.fetchall()
+    cursor = orders_col.find({"user_id": user_id}).sort("created_at", -1).limit(5)
+    orders = await cursor.to_list(length=5)
 
     if not orders:
         text = t["orders_empty"]
     else:
         text = t["orders_title"]
         for o in orders:
+            prod = await products_col.find_one({"product_id": o['product_id']})
+            quality = prod['quality'] if prod and 'quality' in prod else 'Standard Account'
             text += (
                 f"📱 <b>{t['order_item_order']}:</b> <code>{o['order_id']}</code>\n"
-                f"✨ <b>{t['order_item_product']}:</b> {html.escape(o['quality'])}\n"
+                f"✨ <b>{t['order_item_product']}:</b> {html.escape(quality)}\n"
                 f"🔑 <b>{t['order_item_key']}:</b> <code>{html.escape(o['product_id'])}</code>\n"
                 f"💵 <b>{t['order_item_price']}:</b> <code>${o['amount']:.2f}</code>\n"
                 f"───────────────────────\n"
@@ -1133,33 +1039,23 @@ async def cb_help(callback: CallbackQuery):
     lang = user.get('language') or 'ru'
     t = TEXTS[lang]
 
-    async with get_db() as db:
-        async with db.execute("SELECT COUNT(*) FROM products WHERE status = 'available'") as count_cur:
-            total_stock = (await count_cur.fetchone())[0]
-
+    total_stock = await products_col.count_documents({"status": "available"})
     text = t["help_text"].format(total_stock=total_stock)
     await callback.message.edit_text(text, reply_markup=InlineKeyboardMarkup(inline_keyboard=back_home_buttons(lang)), parse_mode="HTML")
 
 async def main():
     bot = Bot(token=BOT_TOKEN)
     
-    # Check and restore database if deleted/reset
-    await auto_restore_db(bot)
-    
-    # Initialize SQLite database schema
+    # Initialize MongoDB Schema / Collections
     await init_db()
 
     dp = Dispatcher(storage=MemoryStorage())
     dp.include_router(router)
 
-    # Start the 12-hour automated backup loop as a background task
-    backup_task = asyncio.create_task(auto_backup_loop(bot))
-
-    logger.info("Bot started successfully.")
+    logger.info("Bot started successfully with MongoDB.")
     try:
         await dp.start_polling(bot)
     finally:
-        backup_task.cancel()
         await bot.session.close()
 
 if __name__ == "__main__":
