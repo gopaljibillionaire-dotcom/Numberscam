@@ -703,13 +703,6 @@ async def cb_admin_panel(callback: CallbackQuery):
     if callback.from_user.id not in ADMIN_IDS: return
     
     kb = InlineKeyboardMarkup(inline_keyboard=[
-        [
-            InlineKeyboardButton(text="🟢 Green Button", callback_data="btn_green", style="success"),
-            InlineKeyboardButton(text="🔴 Red Button", callback_data="btn_red", style="danger")
-        ],
-        [
-            InlineKeyboardButton(text="🔵 Blue Button", callback_data="btn_blue", style="primary")
-        ],
         [InlineKeyboardButton(text="➕ Bulk Add Account Stock", callback_data="admin_add_prod", style="success")],
         [InlineKeyboardButton(text="📤 Export Full Stock (.txt)", callback_data="admin_export_txt")],
         [InlineKeyboardButton(text="📊 Check Storage Usage", callback_data="admin_check_storage", style="primary")],
