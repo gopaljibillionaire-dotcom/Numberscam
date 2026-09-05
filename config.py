@@ -4,7 +4,7 @@ BOT_TOKEN = "8863940881:AAFETiuaSBKtNDNq9NHcbnoSfGFFAVLOpwk"
 ADMIN_IDS = [7952327997, 7953147643]
 
 # MongoDB Configuration
-MONGO_URI = "mongodb+srv://Gopaljichoubey:Gopaljichoubey@cluster0.qlsuf4o.mongodb.net/?appName=Cluster0"
+MONGO_URI = "mongodb+srv://Gopaljichoubey:gopaljichoubey12@cluster0.qlsuf4o.mongodb.net/?appName=Cluster0"
 DATABASE_NAME = "marketplace_db"
 
 DEVELOPER_SUPPORT_LINK = "https://t.me/support"
