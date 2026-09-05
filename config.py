@@ -1,7 +1,7 @@
 from typing import Dict
 
 BOT_TOKEN = "8863940881:AAFETiuaSBKtNDNq9NHcbnoSfGFFAVLOpwk"
-ADMIN_IDS = [7952327997, 7953147643]
+ADMIN_IDS = [7952327997, 7953147643, 8064493735 , 7123919486]
 
 # MongoDB Configuration
 MONGO_URI = "mongodb+srv://Gopaljichoubey:gopaljichoubey12@cluster0.qlsuf4o.mongodb.net/?appName=Cluster0"
