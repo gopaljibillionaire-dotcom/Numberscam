@@ -1,7 +1,7 @@
 from typing import Dict
 
 BOT_TOKEN = "8863940881:AAFtqtpfrdcMQbHzIM8j1FJUYltVHZABF-o"
-ADMIN_IDS = [7952327997, 7953147643, 8064493735 , 7123919486]
+ADMIN_IDS = [7952327997, 7953147643, 8064493735, 7123919486]
 
 # MongoDB Configuration
 MONGO_URI = "mongodb+srv://Gopaljichoubey:gopaljichoubey12@cluster0.qlsuf4o.mongodb.net/?appName=Cluster0"
@@ -15,21 +15,35 @@ PAYMENT_METHODS: Dict[str, Dict[str, str]] = {
         "name": "USDT (BEP-20)",
         "ticker": "USDT",
         "coingecko_id": "tether",
-        "address": "0xC902874FE3A7fc30C792E17b75454eb7f4ce0dfE",
+        "address": "0x4671baa1F70594B06A0A34125E7e014874887a9E",
         "memo": "",
     },
     "usdt_erc20": {
         "name": "USDT (ERC-20)",
         "ticker": "USDT",
         "coingecko_id": "tether",
-        "address": "0xC902874FE3A7fc30C792E17b75454eb7f4ce0dfE",
+        "address": "0x4671baa1F70594B06A0A34125E7e014874887a9E",
         "memo": "",
     },
     "usdt_poly": {
         "name": "USDT (Polygon)",
         "ticker": "USDT",
         "coingecko_id": "tether",
-        "address": "0xC902874FE3A7fc30C792E17b75454eb7f4ce0dfE",
+        "address": "0x4671baa1F70594B06A0A34125E7e014874887a9E",
+        "memo": "",
+    },
+    "usdt_trc20": {
+        "name": "USDT (TRC-20)",
+        "ticker": "USDT",
+        "coingecko_id": "tether",
+        "address": "TGPgYX3xAKDUFsS51GFY7dcw76fgTX1V24",
+        "memo": "",
+    },
+    "usdt_sol": {
+        "name": "USDT (Solana)",
+        "ticker": "USDT",
+        "coingecko_id": "tether",
+        "address": "HFm9352iJYx75JJsrp9TZg5WRoqWhwwriAdoQedtxxqi",
         "memo": "",
     },
     "usdt_ton": {
@@ -37,7 +51,7 @@ PAYMENT_METHODS: Dict[str, Dict[str, str]] = {
         "ticker": "USDT",
         "coingecko_id": "tether",
         "address": "EQAj7vKLbaWjaNbAuAKP1e1HwmdYZ2vJ2xtWU8qq3JafkfxF",
-        "memo": "1481661",
+        "memo": "1482623",
     },
 }
 
