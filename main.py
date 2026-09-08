@@ -86,7 +86,7 @@ class AddProductFSM(StatesGroup):
     select_country = State()
     select_quality = State()
     enter_price = State()
-    enter_content = State()
+    enter_quantity = State()
 
 class RechargeFSM(StatesGroup):
     select_method = State()
@@ -170,63 +170,6 @@ async def cmd_start(message: Message):
     )
     await message.answer(text, reply_markup=get_main_keyboard(message.from_user.id, lang), parse_mode="HTML")
 
-@router.message(F.document, F.from_user.id.in_(ADMIN_IDS))
-async def process_admin_document_import(message: Message, state: FSMContext):
-    file_name = message.document.file_name.lower()
-    current_state = await state.get_state()
-    
-    if file_name.endswith(".txt") and current_state == AddProductFSM.enter_content.state:
-        file_id = message.document.file_id
-        file_info = await message.bot.get_file(file_id)
-        downloaded = await message.bot.download_file(file_info.file_path)
-        raw_content = downloaded.read().decode("utf-8", errors="ignore")
-        
-        lines = [line.strip() for line in raw_content.split("\n") if line.strip()]
-        if not lines:
-            await message.answer("❌ The uploaded .txt file is empty or contains invalid content.")
-            return
-
-        data = await state.get_data()
-        admin_id = message.from_user.id
-        added_count = 0
-
-        for item in lines:
-            prod_id = item.upper()
-            try:
-                await products_col.update_one(
-                    {"product_id": prod_id},
-                    {"$set": {
-                        "product_id": prod_id,
-                        "seller_id": admin_id,
-                        "type": "account",
-                        "country_id": data['country_id'],
-                        "price": data['price'],
-                        "quality": data['quality'],
-                        "bin_link": "",
-                        "status": "available",
-                        "created_at": datetime.datetime.utcnow()
-                    }},
-                    upsert=True
-                )
-                added_count += 1
-            except Exception as e:
-                logger.error(f"Failed to add item '{item}': {e}")
-
-        current_total = data.get('uploaded_total', 0) + added_count
-        await state.update_data(uploaded_total=current_total)
-
-        exit_kb = InlineKeyboardMarkup(inline_keyboard=[
-            [InlineKeyboardButton(text="🛑 Finish / Exit Upload Mode", callback_data="exit_upload", style="danger")]
-        ])
-
-        await message.answer(
-            f"✅ <b>TXT FILE IMPORTED! (+{added_count} Accounts)</b>\n"
-            f"📊 <b>Total Uploaded in this Session:</b> <code>{current_total}</code>\n\n"
-            f"📥 <i>Send more text files or raw lines to continue, or tap Finish below.</i>",
-            reply_markup=exit_kb,
-            parse_mode="HTML"
-        )
-
 @router.callback_query(F.data.startswith("first_lang:"))
 async def cb_first_lang_selection(callback: CallbackQuery):
     lang = callback.data.split(":")[1]
@@ -281,6 +224,8 @@ async def cb_main_menu(callback: CallbackQuery, state: FSMContext):
         balance=user['balance']
     )
     await callback.message.edit_text(text, reply_markup=get_main_keyboard(callback.from_user.id, lang), parse_mode="HTML")
+
+# --- CATALOG & USER PURCHASING ---
 
 @router.callback_query(F.data.startswith("buy_cat:"))
 async def cb_select_category(callback: CallbackQuery):
@@ -344,8 +289,8 @@ async def cb_select_quality_grade(callback: CallbackQuery):
     t = TEXTS[lang]
 
     country = await countries_col.find_one({"id": country_id})
-    fresh_label = t["fresh_acc_label"]
-    broken_label = t["broken_acc_label"]
+    fresh_label = t.get("fresh_acc_label", "🟢 Spam-Free (Fresh)")
+    broken_label = t.get("broken_acc_label", "🔴 Spam (Broken)")
 
     fresh_count = await products_col.count_documents({
         "country_id": country_id,
@@ -360,8 +305,8 @@ async def cb_select_quality_grade(callback: CallbackQuery):
     })
 
     buttons = [
-        [InlineKeyboardButton(text=f"{fresh_label} [{fresh_count}]", callback_data=f"list_prods:{p_type}:{country_id}:fresh:1:{back_page}", style="success")],
-        [InlineKeyboardButton(text=f"{broken_label} [{broken_count}]", callback_data=f"list_prods:{p_type}:{country_id}:broken:1:{back_page}", style="danger")],
+        [InlineKeyboardButton(text=f"{fresh_label} [{fresh_count} available]", callback_data=f"list_prods:{p_type}:{country_id}:fresh:1:{back_page}", style="success")],
+        [InlineKeyboardButton(text=f"{broken_label} [{broken_count} available]", callback_data=f"list_prods:{p_type}:{country_id}:broken:1:{back_page}", style="danger")],
         [InlineKeyboardButton(text=t["btn_back"], callback_data=f"buy_cat:{p_type}:{back_page}")]
     ]
     
@@ -381,80 +326,83 @@ async def cb_list_products(callback: CallbackQuery):
     lang = user.get('language') or 'ru'
     t = TEXTS[lang]
 
+    country = await countries_col.find_one({"id": country_id})
+
+    query = {"country_id": country_id, "status": "available"}
+    if grade == "fresh":
+        query["quality"] = {"$regex": "Spam-Free", "$options": "i"}
+        tier_title = "Spam-Free Account"
+    else:
+        query["quality"] = {"$not": {"$regex": "Spam-Free", "$options": "i"}}
+        tier_title = "Spam Account"
+
+    total_items = await products_col.count_documents(query)
+
+    if total_items == 0:
+        kb = InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text=t["btn_back"], callback_data=f"buy_country:{p_type}:{country_id}:{back_page}")]])
+        await callback.message.edit_text("❌ <b>Out of Stock!</b>\n\nNo accounts are currently available for this category.", reply_markup=kb, parse_mode="HTML")
+        return
+
+    sample_product = await products_col.find_one(query)
+    unit_price = sample_product['price'] if sample_product else 0.0
+
+    text = (
+        f"📱 <b>{country['flag']} {country['name'].upper()} — {tier_title.upper()}</b>\n"
+        f"═══════════════════════\n\n"
+        f"📦 <b>Available Quantity:</b> <code>{total_items} accounts</code>\n"
+        f"💵 <b>Price per Number/Account:</b> <code>${unit_price:.2f} USD</code>\n\n"
+        f"<i>⚡ Buying will automatically issue phone numbers/accounts from this available pool.</i>"
+    )
+
+    buttons = [
+        [InlineKeyboardButton(
+            text=f"🛒 Buy 1 Number (${unit_price:.2f})",
+            callback_data=f"exec_buy:{country_id}:{grade}",
+            style="success"
+        )],
+        [InlineKeyboardButton(text=t["btn_back"], callback_data=f"buy_country:{p_type}:{country_id}:{back_page}")]
+    ]
+
+    await callback.message.edit_text(text, reply_markup=InlineKeyboardMarkup(inline_keyboard=buttons), parse_mode="HTML")
+
+@router.callback_query(F.data.startswith("exec_buy:"))
+async def cb_execute_buy_fresh(callback: CallbackQuery):
+    parts = callback.data.split(":")
+    country_id = int(parts[1])
+    grade = parts[2]
+
+    user_id = callback.from_user.id
+    user = await get_or_create_user(user_id, callback.from_user.username, callback.from_user.first_name)
+    lang = user.get('language') or 'ru'
+    t = TEXTS[lang]
+
     query = {"country_id": country_id, "status": "available"}
     if grade == "fresh":
         query["quality"] = {"$regex": "Spam-Free", "$options": "i"}
     else:
         query["quality"] = {"$not": {"$regex": "Spam-Free", "$options": "i"}}
 
-    total_items = await products_col.count_documents(query)
-
-    if total_items == 0:
-        kb = InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text=t["btn_back"], callback_data=f"buy_country:{p_type}:{country_id}:{back_page}")]])
-        await callback.message.edit_text(t["out_of_stock"], reply_markup=kb, parse_mode="HTML")
-        return
-
-    per_page = 5
-    total_pages = max(1, (total_items + per_page - 1) // per_page)
-    offset = (prod_page - 1) * per_page
-
-    cursor = products_col.find(query).skip(offset).limit(per_page)
-    products = await cursor.to_list(length=per_page)
-
-    text = t["catalog_title"]
-    buttons = []
-
-    text += f"📄 <b>Page {prod_page}/{total_pages}</b> (Showing {len(products)} of {total_items} items):\n\n"
-    for p in products:
-        text += f"🔹 <b>ID:</b> <code>{html.escape(p['product_id'])}</code> — Price: <b>${p['price']:.2f}</b>\n"
-        buttons.append([InlineKeyboardButton(
-            text=f"🛒 Buy {p['product_id']} (${p['price']:.2f})",
-            callback_data=f"exec_buy:{p['product_id']}",
-            style="success"
-        )])
-
-    nav_buttons = []
-    if prod_page > 1:
-        nav_buttons.append(InlineKeyboardButton(text="⬅️ Prev", callback_data=f"list_prods:{p_type}:{country_id}:{grade}:{prod_page - 1}:{back_page}"))
-    nav_buttons.append(InlineKeyboardButton(text=f"📄 {prod_page}/{total_pages}", callback_data="ignore"))
-    if prod_page < total_pages:
-        nav_buttons.append(InlineKeyboardButton(text="Next ➡️", callback_data=f"list_prods:{p_type}:{country_id}:{grade}:{prod_page + 1}:{back_page}"))
-    if nav_buttons:
-        buttons.append(nav_buttons)
-
-    buttons.append([InlineKeyboardButton(text=t["btn_back"], callback_data=f"buy_country:{p_type}:{country_id}:{back_page}")])
-    await callback.message.edit_text(text, reply_markup=InlineKeyboardMarkup(inline_keyboard=buttons), parse_mode="HTML", disable_web_page_preview=True)
-
-@router.callback_query(F.data.startswith("exec_buy:"))
-async def cb_execute_buy_fresh(callback: CallbackQuery):
-    prod_id = callback.data.split(":")[1]
-    user_id = callback.from_user.id
-    user = await get_or_create_user(user_id, callback.from_user.username, callback.from_user.first_name)
-    lang = user.get('language') or 'ru'
-    t = TEXTS[lang]
-
     async with await mongo_client.start_session() as session:
         async with session.start_transaction():
-            u_doc = await users_col.find_one({"telegram_id": user_id}, session=session)
-            p_doc = await products_col.find_one({"product_id": prod_id, "status": "available"}, session=session)
-
+            p_doc = await products_col.find_one(query, session=session)
             if not p_doc:
-                await callback.answer("❌ Account already sold!", show_alert=True)
+                await callback.answer("❌ Stock empty or already sold out!", show_alert=True)
                 return
 
+            u_doc = await users_col.find_one({"telegram_id": user_id}, session=session)
             if u_doc['balance'] < p_doc['price']:
                 await callback.answer(t["insufficient_funds"].format(price=p_doc['price']), show_alert=True)
                 return
 
             new_balance = u_doc['balance'] - p_doc['price']
             await users_col.update_one({"telegram_id": user_id}, {"$set": {"balance": new_balance}}, session=session)
-            await products_col.update_one({"product_id": prod_id}, {"$set": {"status": "sold"}}, session=session)
+            await products_col.update_one({"product_id": p_doc['product_id']}, {"$set": {"status": "sold"}}, session=session)
 
             order_id = f"ORD-{random.randint(100000, 999999)}"
             await orders_col.insert_one({
                 "order_id": order_id,
                 "user_id": user_id,
-                "product_id": prod_id,
+                "product_id": p_doc['product_id'],
                 "amount": p_doc['price'],
                 "status": "completed",
                 "created_at": datetime.datetime.utcnow()
@@ -462,11 +410,13 @@ async def cb_execute_buy_fresh(callback: CallbackQuery):
 
             text = t["purchase_success"].format(
                 order_id=order_id,
-                prod_id=html.escape(prod_id),
+                prod_id=html.escape(p_doc['product_id']),
                 price=p_doc['price'],
                 balance=new_balance
             )
             await callback.message.edit_text(text, reply_markup=InlineKeyboardMarkup(inline_keyboard=back_home_buttons(lang)), parse_mode="HTML")
+
+# --- TOP-UP / RECHARGE SECTION ---
 
 @router.callback_query(F.data == "wallet_topup")
 async def cb_wallet_topup_start(callback: CallbackQuery, state: FSMContext):
@@ -696,20 +646,20 @@ async def cb_admin_reject_topup(callback: CallbackQuery):
 
     await callback.message.edit_caption(caption=f"{callback.message.caption}\n\n❌ <b>REJECTED BY ADMIN</b>", parse_mode="HTML")
 
-# --- ADMIN PANEL AND STORAGE MANAGEMENT ---
+# --- ADMIN PANEL AND STOCK MANAGEMENT ---
 
 @router.callback_query(F.data == "admin_panel")
 async def cb_admin_panel(callback: CallbackQuery):
     if callback.from_user.id not in ADMIN_IDS: return
     
     kb = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="➕ Bulk Add Account Stock", callback_data="admin_add_prod", style="success")],
+        [InlineKeyboardButton(text="➕ Add Stock by Quantity", callback_data="admin_add_prod", style="success")],
         [InlineKeyboardButton(text="📤 Export Full Stock (.txt)", callback_data="admin_export_txt")],
         [InlineKeyboardButton(text="📊 Check Storage Usage", callback_data="admin_check_storage", style="primary")],
         [InlineKeyboardButton(text="⚠️ Delete All Database", callback_data="admin_clear_db_confirm", style="danger")],
         [InlineKeyboardButton(text="🏠 Main Menu", callback_data="main_menu")]
     ])
-    await callback.message.edit_text("👨‍💻 <b>ADMIN CONTROL PANEL</b>\n\nSelect operation mode:\n\n<i>Send a `.txt` file during upload mode to import stock.</i>", reply_markup=kb, parse_mode="HTML")
+    await callback.message.edit_text("👨‍💻 <b>ADMIN CONTROL PANEL</b>\n\nSelect operation mode:", reply_markup=kb, parse_mode="HTML")
 
 @router.callback_query(F.data == "admin_check_storage")
 async def cb_admin_check_storage(callback: CallbackQuery):
@@ -721,7 +671,6 @@ async def cb_admin_check_storage(callback: CallbackQuery):
         storage_size_mb = stats.get("storageSize", 0) / (1024 * 1024)
         index_size_mb = stats.get("indexSize", 0) / (1024 * 1024)
         
-        # Free MongoDB Tier usually cap at 512 MB
         max_storage_mb = 512.0
         available_mb = max(0.0, max_storage_mb - storage_size_mb)
 
@@ -768,18 +717,12 @@ async def cb_admin_clear_db_execute(callback: CallbackQuery):
     await topups_col.delete_many({})
     await countries_col.delete_many({})
 
-    # Re-initialize countries and indexes
     await init_db()
 
     kb = InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="🏠 Main Menu", callback_data="main_menu", style="primary")]
     ])
     await callback.message.edit_text("💥 <b>DATABASE CLEARED SUCCESSFULLY!</b>\n\nAll MongoDB collections have been reset.", reply_markup=kb, parse_mode="HTML")
-
-@router.callback_query(F.data.in_(["btn_green", "btn_red", "btn_blue"]))
-async def cb_colored_buttons_demo(callback: CallbackQuery):
-    btn = callback.data
-    await callback.answer(f"You clicked on styled button: {btn}", show_alert=True)
 
 @router.callback_query(F.data == "admin_export_txt")
 async def cb_admin_export_txt(callback: CallbackQuery):
@@ -824,6 +767,8 @@ async def cb_admin_export_txt(callback: CallbackQuery):
         parse_mode="HTML"
     )
     await callback.answer("Exported!")
+
+# --- ADMIN BULK QUANTITY ADD FLOW ---
 
 @router.callback_query(F.data == "admin_add_prod")
 async def cb_start_add_item(callback: CallbackQuery, state: FSMContext):
@@ -880,9 +825,9 @@ async def cb_item_country(callback: CallbackQuery, state: FSMContext):
 @router.callback_query(F.data.startswith("qual:"), StateFilter(AddProductFSM.select_quality))
 async def cb_item_qual(callback: CallbackQuery, state: FSMContext):
     qual = callback.data.split(":")[1]
-    await state.update_data(quality=qual, uploaded_total=0)
+    await state.update_data(quality=qual)
     await state.set_state(AddProductFSM.enter_price)
-    await callback.message.edit_text("💵 Enter unit price in USD ($):\n\n<i>Example: 0.50 or 1.20</i>", parse_mode="HTML")
+    await callback.message.edit_text("💵 Enter unit price per number/account in USD ($):\n\n<i>Example: 0.50 or 1.20</i>", parse_mode="HTML")
 
 @router.message(StateFilter(AddProductFSM.enter_price))
 async def process_item_price(message: Message, state: FSMContext):
@@ -894,83 +839,60 @@ async def process_item_price(message: Message, state: FSMContext):
         return
 
     await state.update_data(price=price)
-    await state.set_state(AddProductFSM.enter_content)
-    
-    exit_kb = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="🛑 Finish / Exit Upload Mode", callback_data="exit_upload", style="danger")]
-    ])
+    await state.set_state(AddProductFSM.enter_quantity)
+    await message.answer("🔢 <b>How many accounts/numbers do you want to add?</b>\n\n<i>Example: Type 100 to add 100 available stock slots.</i>", parse_mode="HTML")
 
-    await message.answer(
-        "🆔 <b>ADD ACCOUNTS (Continuous Input Mode)</b>\n\n"
-        "Send Account Serial Keys line-by-line OR upload a <code>.txt</code> file directly.\n"
-        "Bot will remain open for more inputs until you click Finish below.",
-        reply_markup=exit_kb,
-        parse_mode="HTML"
-    )
-
-@router.message(StateFilter(AddProductFSM.enter_content))
-async def process_item_content(message: Message, state: FSMContext):
-    data = await state.get_data()
-    raw_text = message.text or message.caption or ""
-    lines = [line.strip() for line in raw_text.split("\n") if line.strip()]
-
-    if not lines:
-        await message.answer("❌ No valid keys found. Please try sending text or a .txt file again.")
+@router.message(StateFilter(AddProductFSM.enter_quantity))
+async def process_item_quantity(message: Message, state: FSMContext):
+    try:
+        quantity = int(message.text)
+        if quantity <= 0: raise ValueError()
+    except ValueError:
+        await message.answer("❌ Invalid quantity. Please enter a positive integer number (e.g. 50, 100):")
         return
 
-    added_count = 0
+    data = await state.get_data()
     admin_id = message.from_user.id
+    country_id = data['country_id']
+    quality = data['quality']
+    price = data['price']
 
-    for item in lines:
-        prod_id = item.upper()
-        try:
-            await products_col.update_one(
-                {"product_id": prod_id},
-                {"$set": {
-                    "product_id": prod_id,
-                    "seller_id": admin_id,
-                    "type": "account",
-                    "country_id": data['country_id'],
-                    "price": data['price'],
-                    "quality": data['quality'],
-                    "bin_link": "",
-                    "status": "available",
-                    "created_at": datetime.datetime.utcnow()
-                }},
-                upsert=True
-            )
-            added_count += 1
-        except Exception as e:
-            logger.error(f"Failed to add account '{item}': {e}")
-            continue
+    c_doc = await countries_col.find_one({"id": country_id})
+    country_code = c_doc['code'].upper() if c_doc else "NUM"
 
-    current_total = data.get('uploaded_total', 0) + added_count
-    await state.update_data(uploaded_total=current_total)
+    bulk_products = []
+    for _ in range(quantity):
+        rand_num = random.randint(100000, 999999)
+        prod_id = f"{country_code}-{rand_num}"
+        bulk_products.append({
+            "product_id": prod_id,
+            "seller_id": admin_id,
+            "type": "account",
+            "country_id": country_id,
+            "price": price,
+            "quality": quality,
+            "bin_link": "",
+            "status": "available",
+            "created_at": datetime.datetime.utcnow()
+        })
 
-    exit_kb = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="🛑 Finish / Exit Upload Mode", callback_data="exit_upload", style="danger")]
-    ])
+    if bulk_products:
+        await products_col.insert_many(bulk_products)
+
+    await state.clear()
 
     await message.answer(
-        f"✅ <b>BATCH SAVED! (+{added_count} Accounts)</b>\n"
-        f"📊 <b>Total Uploaded in this Session:</b> <code>{current_total}</code>\n\n"
-        f"📥 <i>Send more lines or a .txt file to continue adding, or tap Finish when completed.</i>",
-        reply_markup=exit_kb,
-        parse_mode="HTML"
-    )
-
-@router.callback_query(F.data == "exit_upload", StateFilter(AddProductFSM.enter_content))
-async def cb_exit_upload_mode(callback: CallbackQuery, state: FSMContext):
-    data = await state.get_data()
-    uploaded_total = data.get('uploaded_total', 0)
-    await state.clear()
-    
-    await callback.message.edit_text(
-        f"🎉 <b>UPLOAD COMPLETED SUCCESSFULLY!</b>\n═══════════════════════\n\n"
-        f"📦 <b>Total Accounts Added:</b> <code>{uploaded_total}</code>",
+        f"✅ <b>STOCK ADDED SUCCESSFULLY!</b>\n═══════════════════════\n\n"
+        f"🌍 <b>Country:</b> {c_doc['flag']} {c_doc['name']}\n"
+        f"🏷️ <b>Tier:</b> <code>{quality}</code>\n"
+        f"💵 <b>Price per item:</b> <code>${price:.2f} USD</code>\n"
+        f"📦 <b>Added Quantity:</b> <code>{quantity} accounts</code>\n\n"
+        f"<i>Available quantity is now updated to {quantity} accounts for users!</i>",
         reply_markup=InlineKeyboardMarkup(inline_keyboard=back_home_buttons("ru")),
         parse_mode="HTML"
     )
+
+# --- USER PROFILE, ORDERS & HELP ---
 
 @router.callback_query(F.data == "my_profile")
 async def cb_my_profile(callback: CallbackQuery):
@@ -1036,10 +958,11 @@ async def cb_help(callback: CallbackQuery):
     text = t["help_text"].format(total_stock=total_stock)
     await callback.message.edit_text(text, reply_markup=InlineKeyboardMarkup(inline_keyboard=back_home_buttons(lang)), parse_mode="HTML")
 
+# --- MAIN EXECUTION ---
+
 async def main():
     bot = Bot(token=BOT_TOKEN)
     
-    # Initialize MongoDB Schema / Collections
     await init_db()
 
     dp = Dispatcher(storage=MemoryStorage())
