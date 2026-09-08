@@ -9,14 +9,14 @@ import random
 import urllib.parse
 from typing import Optional, List, Dict, Any
 
-from fastapi import FastAPI, HTTPException, Header, Depends, UploadFile, File, Form, status, Query
+from fastapi import FastAPI, HTTPException, Header, Depends, UploadFile, File, Form, status
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import HTMLResponse, JSONResponse, Response
 from motor.motor_asyncio import AsyncIOMotorClient
 import aiohttp
 from pydantic import BaseModel
 
-# --- IMPORT EXISTING BOT CONFIGURATION ---
+# Import configuration strictly from config.py
 try:
     from config import (
         BOT_TOKEN,
@@ -29,22 +29,9 @@ try:
         TEXTS,
     )
 except ImportError:
-    # Fallback configuration for standalone environment testing
-    BOT_TOKEN = os.getenv("BOT_TOKEN", "123456789:AAA_DEFAULT_MOCK_TOKEN")
-    ADMIN_IDS = [int(i) for i in os.getenv("ADMIN_IDS", "123456789").split(",") if i.isdigit()]
-    MONGO_URI = os.getenv("MONGO_URI", "mongodb://localhost:27017")
-    DATABASE_NAME = os.getenv("DATABASE_NAME", "digital_store")
-    DEVELOPER_SUPPORT_LINK = "https://t.me/support"
-    PAYMENT_METHODS = {
-        "usdt_trc20": {"name": "USDT (TRC20)", "ticker": "USDT", "coingecko_id": "tether", "address": "T1234567890ABCDEF", "memo": ""},
-        "ton": {"name": "TON (Toncoin)", "ticker": "TON", "coingecko_id": "the-open-network", "address": "EQD1234567890ABCDEF", "memo": "10001"},
-        "btc": {"name": "Bitcoin (BTC)", "ticker": "BTC", "coingecko_id": "bitcoin", "address": "bc1q1234567890abcdef", "memo": ""},
-        "eth": {"name": "Ethereum (ETH)", "ticker": "ETH", "coingecko_id": "ethereum", "address": "0x1234567890ABCDEF", "memo": ""}
-    }
-    FALLBACK_PRICES = {"tether": 1.0, "the-open-network": 5.50, "bitcoin": 60000.0, "ethereum": 3000.0}
-    TEXTS = {"ru": {}, "en": {}}
+    raise RuntimeError("config.py file is missing or contains invalid configurations.")
 
-# Set up logging
+# Setup logging
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s - %(name)s - %(levelname)s - [%(levelname)s] - %(message)s"
@@ -62,7 +49,7 @@ orders_col = db["orders"]
 topups_col = db["topups"]
 
 # Initialize FastAPI App
-app = FastAPI(title="Digital Store Ultra Mini App", version="2.5.0")
+app = FastAPI(title="Digital Store Ultra Mini App", version="2.6.0")
 
 app.add_middleware(
     CORSMiddleware,
@@ -72,14 +59,13 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+MIN_DEPOSIT_USD = 4.50
+
 # --- HELPER: TELEGRAM BOT NOTIFIER ---
 
 async def send_telegram_admin_notification(caption_text: str, photo_bytes: Optional[bytes] = None, filename: str = "receipt.jpg"):
-    """
-    Sends payment proof and invoice details directly to Admin Telegram Chat(s).
-    """
     if BOT_TOKEN.startswith("123456789"):
-        logger.warning("Using mock BOT_TOKEN. Skipping real Telegram message dispatch.")
+        logger.warning("Using mock BOT_TOKEN. Skipping Telegram message dispatch.")
         return
 
     async with aiohttp.ClientSession() as session:
@@ -305,9 +291,6 @@ async def api_set_language(payload: LanguageRequest, user: dict = Depends(get_cu
 
 @app.get("/api/countries")
 async def api_get_countries(user: dict = Depends(get_current_user)):
-    """
-    Dynamically fetches available stock and exact minimum price strictly from MongoDB database.
-    """
     stock_counts = {}
     pipeline = [
         {"$match": {"status": "available"}},
@@ -329,10 +312,7 @@ async def api_get_countries(user: dict = Depends(get_current_user)):
     async for c in cursor:
         cid = c["id"]
         stock = stock_counts.get(cid, 0)
-        # Fetch dynamic price strictly from database
         min_price = min_prices.get(cid)
-        
-        # If no items in products collection, query country default price from DB document
         if min_price is None:
             min_price = c.get("default_price", 0.0)
 
@@ -349,14 +329,10 @@ async def api_get_countries(user: dict = Depends(get_current_user)):
 
 @app.get("/api/countries/{country_id}")
 async def api_get_country_details(country_id: int, user: dict = Depends(get_current_user)):
-    """
-    Fetches exact price and live availability for Spam-Free and Standard accounts from MongoDB.
-    """
     country = await countries_col.find_one({"id": country_id})
     if not country:
         raise HTTPException(status_code=404, detail="Country configuration not found in database.")
 
-    # Fresh / Spam-Free query from DB
     fresh_count = await products_col.count_documents({
         "country_id": country_id,
         "quality": {"$regex": "Spam-Free", "$options": "i"},
@@ -369,7 +345,6 @@ async def api_get_country_details(country_id: int, user: dict = Depends(get_curr
         "status": "available"
     })
 
-    # Standard / Broken query from DB
     broken_count = await products_col.count_documents({
         "country_id": country_id,
         "quality": {"$not": {"$regex": "Spam-Free", "$options": "i"}},
@@ -382,7 +357,6 @@ async def api_get_country_details(country_id: int, user: dict = Depends(get_curr
         "status": "available"
     })
 
-    # Exact database prices
     fresh_price = fresh_sample["price"] if fresh_sample else country.get("fresh_price", 0.0)
     broken_price = broken_sample["price"] if broken_sample else country.get("broken_price", 0.0)
 
@@ -410,7 +384,6 @@ async def api_execute_purchase(req: PurchaseRequest, user: dict = Depends(get_cu
     else:
         query["quality"] = {"$not": {"$regex": "Spam-Free", "$options": "i"}}
 
-    # Fetch product directly from MongoDB
     p_doc = await products_col.find_one(query)
     if not p_doc:
         raise HTTPException(status_code=400, detail="Stock empty for selected category.")
@@ -428,7 +401,6 @@ async def api_execute_purchase(req: PurchaseRequest, user: dict = Depends(get_cu
 
     new_balance = current_bal - item_price
     
-    # Atomic updates
     await users_col.update_one({"telegram_id": user_id}, {"$set": {"balance": new_balance}})
     await products_col.update_one({"_id": p_doc["_id"]}, {"$set": {"status": "sold"}})
 
@@ -473,15 +445,15 @@ async def api_get_payment_methods(user: dict = Depends(get_current_user)):
 
 @app.post("/api/deposit")
 async def api_create_deposit(req: DepositRequest, user: dict = Depends(get_current_user)):
-    if req.amount < 1.00:
-        raise HTTPException(status_code=400, detail="Minimum deposit amount is $1.00 USD.")
+    if req.amount < MIN_DEPOSIT_USD:
+        raise HTTPException(status_code=400, detail=f"Minimum deposit amount is ${MIN_DEPOSIT_USD:.2f} USD.")
     
     if req.method_key not in PAYMENT_METHODS:
         raise HTTPException(status_code=400, detail="Invalid payment method key.")
 
     method_info = PAYMENT_METHODS[req.method_key]
     invoice_code = f"INV-{random.randint(10000, 99999)}"
-    crypto_price = await get_crypto_price_usd(method_info["coingecko_id"])
+    crypto_price = await get_crypto_price_usd(method_info.get("coingecko_id", "tether"))
     calculated = req.amount / crypto_price
     unique_offset = random.randint(1, 99) * 0.0001
     coin_amount = f"{calculated + unique_offset:.4f}"
@@ -490,9 +462,9 @@ async def api_create_deposit(req: DepositRequest, user: dict = Depends(get_curre
         "invoice_code": invoice_code,
         "amount_usd": req.amount,
         "crypto_amount": coin_amount,
-        "ticker": method_info["ticker"],
-        "network": method_info["name"],
-        "address": method_info["address"],
+        "ticker": method_info.get("ticker", "USDT"),
+        "network": method_info.get("name", req.method_key),
+        "address": method_info.get("address", ""),
         "memo": method_info.get("memo", "")
     }
 
@@ -505,9 +477,6 @@ async def api_upload_deposit_proof(
     file: UploadFile = File(...),
     user: dict = Depends(get_current_user)
 ):
-    """
-    Saves deposit proof in Database and immediately forwards the photo and metadata to Admin via Telegram Bot API.
-    """
     method_name = PAYMENT_METHODS.get(method_key, {}).get("name", method_key)
     file_bytes = await file.read()
 
@@ -525,7 +494,6 @@ async def api_upload_deposit_proof(
     }
     await topups_col.insert_one(topup_doc)
 
-    # Format admin notification message
     caption = (
         f"🚨 <b>NEW DEPOSIT PROOF SUBMITTED</b> 🚨\n\n"
         f"<b>Invoice ID:</b> <code>{invoice_code}</code>\n"
@@ -537,7 +505,6 @@ async def api_upload_deposit_proof(
         f"<code>/addbalance {user['telegram_id']} {amount}</code>"
     )
 
-    # Dispatch receipt directly to Admin Telegram
     asyncio.create_task(
         send_telegram_admin_notification(
             caption_text=caption,
@@ -546,7 +513,7 @@ async def api_upload_deposit_proof(
         )
     )
 
-    return {"status": "success", "message": "Payment proof submitted. Admin notified via Telegram!"}
+    return {"status": "success", "message": "Payment proof submitted to Admin!"}
 
 # --- ADMIN API ENDPOINTS ---
 
@@ -583,29 +550,26 @@ async def api_admin_add_stock(req: AdminAddStockRequest, admin: dict = Depends(g
 
 # --- EMBEDDED HIGH-PERFORMANCE FRONTEND WEBAPP ---
 
-HTML_CONTENT = """<!DOCTYPE html>
+HTML_CONTENT = f"""<!DOCTYPE html>
 <html lang="en" class="dark">
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover">
     <title>Digital Marketplace Mini App</title>
-    <!-- Telegram WebApp SDK -->
     <script src="https://telegram.org/js/telegram-web-app.js"></script>
-    <!-- Tailwind CSS CDN -->
     <script src="https://cdn.tailwindcss.com"></script>
-    <!-- Fonts -->
     <link href="https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@300;400;500;600;700;800&family=JetBrains+Mono:wght@400;600&display=swap" rel="stylesheet">
     <script>
-        tailwind.config = {
+        tailwind.config = {{
             darkMode: 'class',
-            theme: {
-                extend: {
-                    fontFamily: {
+            theme: {{
+                extend: {{
+                    fontFamily: {{
                         sans: ['Plus Jakarta Sans', 'sans-serif'],
                         mono: ['JetBrains Mono', 'monospace'],
-                    },
-                    colors: {
-                        brand: {
+                    }},
+                    colors: {{
+                        brand: {{
                             50: '#eff6ff',
                             100: '#dbeafe',
                             400: '#60a5fa',
@@ -613,59 +577,40 @@ HTML_CONTENT = """<!DOCTYPE html>
                             600: '#2563eb',
                             700: '#1d4ed8',
                             900: '#1e3a8a',
-                        },
-                        dark: {
+                        }},
+                        dark: {{
                             bg: '#090d16',
                             card: '#111827',
                             border: 'rgba(255, 255, 255, 0.08)',
-                        }
-                    },
-                    animation: {
-                        'pulse-glow': 'pulseGlow 3s infinite alternate',
-                        'float': 'float 4s ease-in-out infinite',
-                        'shimmer': 'shimmer 2s infinite linear',
-                    },
-                    keyframes: {
-                        pulseGlow: {
-                            '0%': { boxShadow: '0 0 15px -3px rgba(59, 130, 246, 0.3)' },
-                            '100%': { boxShadow: '0 0 35px 8px rgba(139, 92, 246, 0.5)' },
-                        },
-                        float: {
-                            '0%, 100%': { transform: 'translateY(0px)' },
-                            '50%': { transform: 'translateY(-6px)' },
-                        },
-                        shimmer: {
-                            '0%': { backgroundPosition: '-200% 0' },
-                            '100%': { backgroundPosition: '200% 0' },
-                        }
-                    }
-                }
-            }
-        }
+                        }}
+                    }}
+                }}
+            }}
+        }}
     </script>
     <style>
-        * { -webkit-tap-highlight-color: transparent; user-select: none; }
-        body { background-color: #070a12; color: #f3f4f6; min-height: 100vh; padding-bottom: 90px; }
-        .glass-card {
+        * {{ -webkit-tap-highlight-color: transparent; user-select: none; }}
+        body {{ background-color: #070a12; color: #f3f4f6; min-height: 100vh; padding-bottom: 90px; }}
+        .glass-card {{
             background: linear-gradient(135deg, rgba(255, 255, 255, 0.05) 0%, rgba(255, 255, 255, 0.02) 100%);
             backdrop-filter: blur(16px);
             -webkit-backdrop-filter: blur(16px);
             border: 1px solid rgba(255, 255, 255, 0.08);
-        }
-        .glass-card-hover:active {
+        }}
+        .glass-card-hover:active {{
             transform: scale(0.98);
             border-color: rgba(59, 130, 246, 0.4);
-        }
-        .skeleton {
+        }}
+        .skeleton {{
             background: linear-gradient(90deg, #111827 25%, #1f2937 50%, #111827 75%);
             background-size: 200% 100%;
             animation: shimmer 1.8s infinite;
-        }
-        .nav-active {
+        }}
+        .nav-active {{
             color: #60a5fa;
             position: relative;
-        }
-        .nav-active::after {
+        }}
+        .nav-active::after {{
             content: '';
             position: absolute;
             bottom: -6px;
@@ -676,10 +621,11 @@ HTML_CONTENT = """<!DOCTYPE html>
             background: #60a5fa;
             border-radius: 99px;
             box-shadow: 0 0 10px #60a5fa;
-        }
-        ::-webkit-scrollbar { width: 4px; }
-        ::-webkit-scrollbar-track { background: transparent; }
-        ::-webkit-scrollbar-thumb { background: #1f2937; border-radius: 4px; }
+        }}
+        @keyframes shimmer {{
+            0% {{ background-position: -200% 0; }}
+            100% {{ background-position: 200% 0; }}
+        }}
     </style>
 </head>
 <body class="font-sans antialiased selection:bg-brand-500 selection:text-white">
@@ -713,15 +659,11 @@ HTML_CONTENT = """<!DOCTYPE html>
 
         <!-- HOME VIEW -->
         <div id="view-home" class="space-y-5">
-            <div class="glass-card rounded-3xl p-6 relative overflow-hidden animate-pulse-glow border border-brand-500/30 bg-gradient-to-br from-brand-900/40 via-purple-900/20 to-slate-900">
-                <div class="absolute -right-8 -bottom-8 w-32 h-32 bg-brand-500/20 rounded-full blur-2xl pointer-events-none"></div>
+            <div class="glass-card rounded-3xl p-6 relative overflow-hidden border border-brand-500/30 bg-gradient-to-br from-brand-900/40 via-purple-900/20 to-slate-900">
                 <div class="flex justify-between items-start mb-4 relative z-10">
                     <div>
                         <span id="txt-welcome-label" class="text-xs font-bold uppercase tracking-wider text-brand-400">Total Balance</span>
                         <div id="home-balance" class="text-4xl font-extrabold text-white mt-1 tracking-tight font-mono">$0.00</div>
-                    </div>
-                    <div class="p-3 bg-brand-500/20 rounded-2xl border border-brand-500/30 text-brand-400 animate-float">
-                        <svg class="w-6 h-6" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M3 10h18M7 15h1m4 0h1m-7 4h12a2 2 0 002-2V8a2 2 0 00-2-2H5a2 2 0 00-2 2v8a2 2 0 002 2z"></path></svg>
                     </div>
                 </div>
                 <button onclick="switchTab('wallet')" class="w-full py-3.5 bg-gradient-to-r from-brand-600 via-purple-600 to-pink-600 hover:opacity-95 active:scale-[0.98] transition-all rounded-2xl font-bold text-white text-sm shadow-xl flex items-center justify-center gap-2 tracking-wide">
@@ -732,24 +674,15 @@ HTML_CONTENT = """<!DOCTYPE html>
 
             <div class="grid grid-cols-2 gap-3">
                 <button onclick="switchTab('shop')" class="glass-card glass-card-hover p-4 rounded-2xl flex flex-col items-center justify-center gap-2.5 transition-all">
-                    <div class="p-3 bg-blue-500/10 rounded-2xl text-blue-400 border border-blue-500/20">
-                        <svg class="w-6 h-6" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M16 11V7a4 4 0 00-8 0v4M5 9h14l1 12H4L5 9z"></path></svg>
-                    </div>
                     <span id="nav-shop-label" class="font-bold text-sm text-slate-200">Account Shop</span>
                 </button>
                 <button onclick="switchTab('orders')" class="glass-card glass-card-hover p-4 rounded-2xl flex flex-col items-center justify-center gap-2.5 transition-all">
-                    <div class="p-3 bg-emerald-500/10 rounded-2xl text-emerald-400 border border-emerald-500/20">
-                        <svg class="w-6 h-6" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M20 7l-8-4-8 4m16 0l-8 4m8-4v10l-8 4m0-10L4 7m8 4v10M4 7v10l8 4"></path></svg>
-                    </div>
                     <span id="nav-orders-label" class="font-bold text-sm text-slate-200">My Purchases</span>
                 </button>
             </div>
 
             <div class="glass-card p-5 rounded-2xl space-y-3">
-                <h3 class="font-bold text-xs uppercase tracking-wider text-slate-400 flex items-center gap-2">
-                    <svg class="w-4 h-4 text-brand-400" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M13 7h8m0 0v8m0-8l-8 8-4-4-6 6"></path></svg>
-                    Account Activity
-                </h3>
+                <h3 class="font-bold text-xs uppercase tracking-wider text-slate-400">Account Activity</h3>
                 <div class="grid grid-cols-2 gap-3 pt-1">
                     <div class="bg-slate-900/60 p-3 rounded-xl border border-white/5">
                         <span class="text-[11px] text-slate-400 block font-medium">Completed Orders</span>
@@ -764,7 +697,6 @@ HTML_CONTENT = """<!DOCTYPE html>
 
             <div id="admin-quick-btn" class="hidden">
                 <button onclick="switchTab('admin')" class="w-full p-3.5 glass-card rounded-2xl border-red-500/40 text-red-400 font-bold text-sm flex items-center justify-center gap-2 hover:bg-red-500/10 transition-colors">
-                    <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-3L13.732 4c-.77-1.333-2.694-1.333-3.464 0L3.34 16c-.77 1.333.192 3 1.732 3z"></path></svg>
                     Admin Control Center
                 </button>
             </div>
@@ -773,8 +705,7 @@ HTML_CONTENT = """<!DOCTYPE html>
         <!-- SHOP VIEW -->
         <div id="view-shop" class="hidden space-y-4">
             <div class="relative">
-                <svg class="w-4 h-4 absolute left-3.5 top-3.5 text-slate-400" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M21 21l-6-6m2-5a7 7 0 11-14 0 7 7 0 0114 0z"></path></svg>
-                <input type="text" id="search-country" oninput="filterCountries()" placeholder="Search available countries..." class="w-full pl-10 pr-4 py-3 glass-card rounded-2xl text-sm focus:outline-none focus:border-brand-500 text-white placeholder-slate-500 font-medium">
+                <input type="text" id="search-country" oninput="filterCountries()" placeholder="Search available countries..." class="w-full pl-4 pr-4 py-3 glass-card rounded-2xl text-sm focus:outline-none focus:border-brand-500 text-white placeholder-slate-500 font-medium">
             </div>
 
             <div id="country-list" class="grid grid-cols-1 gap-2.5">
@@ -786,8 +717,7 @@ HTML_CONTENT = """<!DOCTYPE html>
         <!-- COUNTRY DETAIL VIEW -->
         <div id="view-country-detail" class="hidden space-y-4">
             <button onclick="switchTab('shop')" class="text-xs font-bold text-brand-400 flex items-center gap-1.5 mb-2 active:scale-95 transition-transform">
-                <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M10 19l-7-7m0 0l7-7m-7 7h18"></path></svg>
-                Back to Countries
+                ← Back to Countries
             </button>
 
             <div class="glass-card p-5 rounded-2xl flex items-center justify-between border-brand-500/30 bg-gradient-to-r from-brand-900/30 to-slate-900">
@@ -801,28 +731,20 @@ HTML_CONTENT = """<!DOCTYPE html>
             </div>
 
             <div class="space-y-3">
-                <!-- FRESH GRADE -->
-                <div class="glass-card p-4 rounded-2xl flex items-center justify-between border-emerald-500/30 hover:border-emerald-500/50 transition-colors">
+                <div class="glass-card p-4 rounded-2xl flex items-center justify-between border-emerald-500/30">
                     <div>
-                        <div class="flex items-center gap-2 font-bold text-emerald-400 text-sm">
-                            <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 12l2 2 4-4m6 2a9 9 0 11-18 0 9 9 0 0118 0z"></path></svg>
-                            Spam-Free (Fresh)
-                        </div>
+                        <div class="flex items-center gap-2 font-bold text-emerald-400 text-sm">Spam-Free (Fresh)</div>
                         <div id="fresh-stock-info" class="text-xs text-slate-400 mt-1 font-mono">Available: -- | Price: $0.00</div>
                     </div>
-                    <button onclick="openPurchaseModal('fresh')" id="btn-buy-fresh" class="px-5 py-2.5 bg-emerald-600 hover:bg-emerald-500 text-white font-bold text-xs rounded-xl active:scale-95 transition-all shadow-lg shadow-emerald-600/20">Buy</button>
+                    <button onclick="openPurchaseModal('fresh')" id="btn-buy-fresh" class="px-5 py-2.5 bg-emerald-600 text-white font-bold text-xs rounded-xl active:scale-95 transition-all">Buy</button>
                 </div>
 
-                <!-- BROKEN GRADE -->
-                <div class="glass-card p-4 rounded-2xl flex items-center justify-between border-amber-500/30 hover:border-amber-500/50 transition-colors">
+                <div class="glass-card p-4 rounded-2xl flex items-center justify-between border-amber-500/30">
                     <div>
-                        <div class="flex items-center gap-2 font-bold text-amber-400 text-sm">
-                            <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-3L13.732 4c-.77-1.333-2.694-1.333-3.464 0L3.34 16c-.77 1.333.192 3 1.732 3z"></path></svg>
-                            Standard / Spam Grade
-                        </div>
+                        <div class="flex items-center gap-2 font-bold text-amber-400 text-sm">Standard / Spam Grade</div>
                         <div id="broken-stock-info" class="text-xs text-slate-400 mt-1 font-mono">Available: -- | Price: $0.00</div>
                     </div>
-                    <button onclick="openPurchaseModal('broken')" id="btn-buy-broken" class="px-5 py-2.5 bg-amber-600 hover:bg-amber-500 text-white font-bold text-xs rounded-xl active:scale-95 transition-all shadow-lg shadow-amber-600/20">Buy</button>
+                    <button onclick="openPurchaseModal('broken')" id="btn-buy-broken" class="px-5 py-2.5 bg-amber-600 text-white font-bold text-xs rounded-xl active:scale-95 transition-all">Buy</button>
                 </div>
             </div>
         </div>
@@ -839,21 +761,22 @@ HTML_CONTENT = """<!DOCTYPE html>
 
             <div id="deposit-amount-section" class="hidden glass-card p-5 rounded-2xl space-y-4 border-brand-500/40">
                 <h4 class="font-bold text-xs text-brand-400 uppercase tracking-wider">Select Amount (USD)</h4>
+                <p class="text-[11px] text-amber-400 font-medium">⚠️ Minimum Deposit: $4.50 USD</p>
                 <div class="grid grid-cols-4 gap-2">
-                    <button onclick="selectPresetAmount(5)" class="py-2.5 bg-slate-900 hover:bg-brand-600 text-white text-xs font-bold rounded-xl border border-white/10 transition-colors">$5.00</button>
+                    <button onclick="selectPresetAmount(4.50)" class="py-2.5 bg-slate-900 hover:bg-brand-600 text-white text-xs font-bold rounded-xl border border-white/10 transition-colors">$4.50</button>
                     <button onclick="selectPresetAmount(10)" class="py-2.5 bg-slate-900 hover:bg-brand-600 text-white text-xs font-bold rounded-xl border border-white/10 transition-colors">$10.00</button>
                     <button onclick="selectPresetAmount(25)" class="py-2.5 bg-slate-900 hover:bg-brand-600 text-white text-xs font-bold rounded-xl border border-white/10 transition-colors">$25.00</button>
                     <button onclick="selectPresetAmount(50)" class="py-2.5 bg-slate-900 hover:bg-brand-600 text-white text-xs font-bold rounded-xl border border-white/10 transition-colors">$50.00</button>
                 </div>
                 <div class="flex gap-2">
-                    <input type="number" id="custom-deposit-amt" min="1" step="0.5" placeholder="Custom USD" class="flex-1 px-4 py-3 glass-card rounded-xl text-xs text-white focus:outline-none border-white/10 font-mono">
+                    <input type="number" id="custom-deposit-amt" min="4.50" step="0.5" placeholder="Custom USD ($4.50 min)" class="flex-1 px-4 py-3 glass-card rounded-xl text-xs text-white focus:outline-none border-white/10 font-mono">
                     <button onclick="generateInvoice()" class="px-5 py-3 bg-brand-600 text-white text-xs font-bold rounded-xl hover:bg-brand-500 active:scale-95 transition-all shadow-lg">Pay Now</button>
                 </div>
             </div>
 
             <div id="invoice-section" class="hidden glass-card p-5 rounded-2xl space-y-4 border-emerald-500/40 bg-slate-900/90">
                 <div class="flex justify-between items-center border-b border-white/10 pb-3">
-                    <span id="invoice-net" class="font-bold text-sm text-brand-400">USDT (TRC20)</span>
+                    <span id="invoice-net" class="font-bold text-sm text-brand-400">USDT</span>
                     <span id="invoice-code" class="text-xs font-mono text-slate-400">INV-00000</span>
                 </div>
                 <div>
@@ -864,11 +787,19 @@ HTML_CONTENT = """<!DOCTYPE html>
                     <span class="text-xs text-slate-400 block mb-1">Deposit Address:</span>
                     <div id="invoice-address" class="text-xs font-mono bg-black/60 p-3 rounded-xl break-all text-slate-200 select-all border border-white/5">0x000...</div>
                 </div>
-                <div class="pt-2">
+                <!-- DYNAMIC MEMO / TAG SECTION -->
+                <div id="memo-container" class="hidden">
+                    <span class="text-xs text-amber-400 font-bold block mb-1">⚠️ Memo / Tag (Required):</span>
+                    <div id="invoice-memo" class="text-xs font-mono bg-amber-500/10 text-amber-300 p-3 rounded-xl break-all select-all border border-amber-500/30 font-bold">----</div>
+                </div>
+                <div class="pt-2 space-y-2">
+                    <button onclick="exitAndSendProof()" class="w-full py-3.5 bg-gradient-to-r from-emerald-600 to-teal-600 hover:opacity-95 text-white font-bold text-xs rounded-xl active:scale-95 transition-all shadow-lg flex items-center justify-center gap-2">
+                        <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M10 6H6a2 2 0 00-2 2v10a2 2 0 002 2h10a2 2 0 002-2v-4M14 4h6m0 0v6m0-6L10 14"></path></svg>
+                        Exit App & Send Payment Proof
+                    </button>
                     <input type="file" id="proof-file" accept="image/*" class="hidden" onchange="uploadProof(this)">
-                    <button onclick="document.getElementById('proof-file').click()" class="w-full py-3 bg-emerald-600 hover:bg-emerald-500 text-white font-bold text-xs rounded-xl active:scale-95 transition-all shadow-lg flex items-center justify-center gap-2">
-                        <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-8l-4-4m0 0L8 8m4-4v12"></path></svg>
-                        Upload Payment Proof
+                    <button onclick="document.getElementById('proof-file').click()" class="w-full py-2.5 bg-slate-800 hover:bg-slate-700 text-slate-300 font-medium text-xs rounded-xl active:scale-95 transition-all">
+                        Or Upload Receipt Directly Here
                     </button>
                 </div>
             </div>
@@ -902,19 +833,14 @@ HTML_CONTENT = """<!DOCTYPE html>
                 </div>
             </div>
 
-            <a id="support-link" href="#" target="_blank" class="w-full p-4 glass-card rounded-2xl font-bold text-xs text-brand-400 border-brand-500/30 flex items-center justify-center gap-2 hover:bg-brand-500/10 transition-colors">
-                <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M18.364 5.636l-3.536 3.536m0 5.656l3.536 3.536M9.172 9.172L5.636 5.636m3.536 9.192l-3.536 3.536M21 12a9 9 0 11-18 0 11-18 0zm-5 0a4 4 0 11-8 0 4 4 0 018 0z"></path></svg>
+            <a id="support-link" href="{DEVELOPER_SUPPORT_LINK}" target="_blank" class="w-full p-4 glass-card rounded-2xl font-bold text-xs text-brand-400 border-brand-500/30 flex items-center justify-center gap-2 hover:bg-brand-500/10 transition-colors">
                 Contact Developer Support
             </a>
         </div>
 
         <!-- ADMIN DASHBOARD VIEW -->
         <div id="view-admin" class="hidden space-y-4">
-            <h2 class="font-bold text-xs uppercase tracking-wider text-red-400 flex items-center gap-2">
-                <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 12l2 2 4-4m5.618-4.016A11.955 11.955 0 0112 2.944a11.955 11.955 0 01-8.618 3.04A12.02 12.02 0 003 9c0 5.591 3.824 10.29 9 11.622 5.176-1.332 9-6.03 9-11.622 0-1.042-.133-2.052-.382-3.016z"></path></svg>
-                Admin Management Suite
-            </h2>
-
+            <h2 class="font-bold text-xs uppercase tracking-wider text-red-400">Admin Management Suite</h2>
             <div class="glass-card p-5 rounded-2xl space-y-3">
                 <h3 class="font-bold text-xs text-white uppercase tracking-wider">➕ Quick Bulk Add Stock</h3>
                 <select id="admin-country-select" class="w-full p-3 glass-card rounded-xl text-xs text-white border-white/10 focus:outline-none bg-slate-900"></select>
@@ -926,7 +852,7 @@ HTML_CONTENT = """<!DOCTYPE html>
                     <input type="number" id="admin-price-input" step="0.01" placeholder="Price ($)" class="p-3 glass-card rounded-xl text-xs text-white border-white/10 font-mono">
                     <input type="number" id="admin-qty-input" placeholder="Quantity" class="p-3 glass-card rounded-xl text-xs text-white border-white/10 font-mono">
                 </div>
-                <button onclick="submitAdminStock()" class="w-full py-3 bg-emerald-600 hover:bg-emerald-500 font-bold text-xs text-white rounded-xl active:scale-95 transition-all shadow-lg">Add Accounts</button>
+                <button onclick="submitAdminStock()" class="w-full py-3 bg-emerald-600 font-bold text-xs text-white rounded-xl active:scale-95 transition-all">Add Accounts</button>
             </div>
         </div>
 
@@ -942,39 +868,23 @@ HTML_CONTENT = """<!DOCTYPE html>
                 <div class="flex justify-between"><span>Price:</span><span id="modal-price" class="font-bold text-emerald-400 font-mono text-sm"></span></div>
             </div>
             <div class="flex gap-2 pt-2">
-                <button onclick="closeModal()" class="flex-1 py-2.5 bg-slate-800 text-slate-300 text-xs font-bold rounded-xl active:scale-95 transition-transform">Cancel</button>
-                <button onclick="confirmPurchase()" class="flex-1 py-2.5 bg-brand-600 text-white text-xs font-bold rounded-xl shadow-lg active:scale-95 transition-transform">Confirm</button>
+                <button onclick="closeModal()" class="flex-1 py-2.5 bg-slate-800 text-slate-300 text-xs font-bold rounded-xl">Cancel</button>
+                <button onclick="confirmPurchase()" class="flex-1 py-2.5 bg-brand-600 text-white text-xs font-bold rounded-xl shadow-lg">Confirm</button>
             </div>
         </div>
     </div>
 
     <!-- BOTTOM NAVIGATION -->
     <nav class="fixed bottom-0 left-0 right-0 glass-card border-t border-white/10 p-2.5 flex justify-around items-center z-40 max-w-lg mx-auto bg-[#070a12]/95 backdrop-blur-2xl">
-        <button onclick="switchTab('home')" id="nav-home" class="flex flex-col items-center gap-1 text-slate-400 text-[10px] font-bold nav-active transition-all">
-            <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M3 12l2-2m0 0l7-7 7 7M5 10v10a1 1 0 001 1h3m10-11l2 2m-2-2v10a1 1 0 01-1 1h-3m-6 0a1 1 0 001-1v-4a1 1 0 011-1h2a1 1 0 011 1v4a1 1 0 001 1m-6 0h6"></path></svg>
-            Home
-        </button>
-        <button onclick="switchTab('shop')" id="nav-shop" class="flex flex-col items-center gap-1 text-slate-400 text-[10px] font-bold transition-all">
-            <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M16 11V7a4 4 0 00-8 0v4M5 9h14l1 12H4L5 9z"></path></svg>
-            Shop
-        </button>
-        <button onclick="switchTab('wallet')" id="nav-wallet" class="flex flex-col items-center gap-1 text-slate-400 text-[10px] font-bold transition-all">
-            <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M3 10h18M7 15h1m4 0h1m-7 4h12a2 2 0 002-2V8a2 2 0 00-2-2H5a2 2 0 00-2 2v8a2 2 0 002 2z"></path></svg>
-            Wallet
-        </button>
-        <button onclick="switchTab('orders')" id="nav-orders" class="flex flex-col items-center gap-1 text-slate-400 text-[10px] font-bold transition-all">
-            <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M20 7l-8-4-8 4m16 0l-8 4m8-4v10l-8 4m0-10L4 7m8 4v10M4 7v10l8 4"></path></svg>
-            Orders
-        </button>
-        <button onclick="switchTab('profile')" id="nav-profile" class="flex flex-col items-center gap-1 text-slate-400 text-[10px] font-bold transition-all">
-            <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M16 7a4 4 0 11-8 0 4 4 0 018 0zM12 14a7 7 0 00-7 7h14a7 7 0 00-7-7z"></path></svg>
-            Profile
-        </button>
+        <button onclick="switchTab('home')" id="nav-home" class="flex flex-col items-center gap-1 text-slate-400 text-[10px] font-bold nav-active">Home</button>
+        <button onclick="switchTab('shop')" id="nav-shop" class="flex flex-col items-center gap-1 text-slate-400 text-[10px] font-bold">Shop</button>
+        <button onclick="switchTab('wallet')" id="nav-wallet" class="flex flex-col items-center gap-1 text-slate-400 text-[10px] font-bold">Wallet</button>
+        <button onclick="switchTab('orders')" id="nav-orders" class="flex flex-col items-center gap-1 text-slate-400 text-[10px] font-bold">Orders</button>
+        <button onclick="switchTab('profile')" id="nav-profile" class="flex flex-col items-center gap-1 text-slate-400 text-[10px] font-bold">Profile</button>
     </nav>
 
-    <!-- SCRIPT LOGIC -->
     <script>
-        const tg = window.Telegram?.WebApp || {};
+        const tg = window.Telegram?.WebApp || {{}};
         if (tg.expand) tg.expand();
 
         const initData = tg.initData || "";
@@ -983,36 +893,37 @@ HTML_CONTENT = """<!DOCTYPE html>
         let selectedCountryId = null;
         let selectedGrade = null;
         let selectedPaymentMethod = null;
+        let currentInvoiceDetails = null;
 
-        const translations = {
-            ru: { welcome: "Баланс Кошелька", deposit: "Пополнить баланс", shop: "Магазин Аккаунтов", orders: "Мои Покупки" },
-            en: { welcome: "Wallet Balance", deposit: "Top Up Balance", shop: "Account Shop", orders: "My Purchases" }
-        };
+        const translations = {{
+            ru: {{ welcome: "Баланс Кошелька", deposit: "Пополнить баланс", shop: "Магазин Аккаунтов", orders: "Мои Покупки" }},
+            en: {{ welcome: "Wallet Balance", deposit: "Top Up Balance", shop: "Account Shop", orders: "My Purchases" }}
+        }};
 
-        async function fetchAPI(endpoint, options = {}) {
-            options.headers = {
+        async function fetchAPI(endpoint, options = {{}}) {{
+            options.headers = {{
                 ...options.headers,
                 'X-Telegram-Init-Data': initData
-            };
+            }};
             const response = await fetch('/api' + endpoint, options);
-            if (!response.ok) {
+            if (!response.ok) {{
                 const err = await response.json();
                 throw new Error(err.detail || 'API Request failed');
-            }
+            }}
             return response.json();
-        }
+        }}
 
-        async function initApp() {
-            try {
+        async function initApp() {{
+            try {{
                 currentUser = await fetchAPI('/me');
                 updateUIUser();
                 await loadCountries();
-            } catch (e) {
+            }} catch (e) {{
                 console.error(e);
-            }
-        }
+            }}
+        }}
 
-        function updateUIUser() {
+        function updateUIUser() {{
             if (!currentUser) return;
 
             document.getElementById('user-name').innerText = currentUser.first_name || 'Telegram User';
@@ -1033,19 +944,19 @@ HTML_CONTENT = """<!DOCTYPE html>
 
             document.getElementById('support-link').href = currentUser.support_url;
 
-            if (currentUser.is_admin) {
+            if (currentUser.is_admin) {{
                 document.getElementById('admin-quick-btn').classList.remove('hidden');
                 document.getElementById('badge-admin').classList.remove('hidden');
-            }
+            }}
 
             const lang = currentUser.language || 'ru';
             document.getElementById('txt-welcome-label').innerText = translations[lang].welcome;
             document.getElementById('btn-deposit-label').innerText = translations[lang].deposit;
             document.getElementById('nav-shop-label').innerText = translations[lang].shop;
             document.getElementById('nav-orders-label').innerText = translations[lang].orders;
-        }
+        }}
 
-        function switchTab(tab) {
+        function switchTab(tab) {{
             if (tg.HapticFeedback) tg.HapticFeedback.impactOccurred('light');
 
             const views = ['home', 'shop', 'country-detail', 'wallet', 'orders', 'profile', 'admin'];
@@ -1062,57 +973,57 @@ HTML_CONTENT = """<!DOCTYPE html>
             if (tab === 'wallet') loadPaymentMethods();
             if (tab === 'orders') loadOrders();
             if (tab === 'admin') loadAdminDashboard();
-        }
+        }}
 
-        async function loadCountries() {
-            try {
+        async function loadCountries() {{
+            try {{
                 allCountries = await fetchAPI('/countries');
                 renderCountries(allCountries);
-            } catch (e) { console.error(e); }
-        }
+            }} catch (e) {{ console.error(e); }}
+        }}
 
-        function renderCountries(list) {
+        function renderCountries(list) {{
             const container = document.getElementById('country-list');
-            if (!list.length) {
+            if (!list.length) {{
                 container.innerHTML = `<div class="text-center text-slate-500 py-8 text-xs font-medium">No countries available.</div>`;
                 return;
-            }
+            }}
             container.innerHTML = list.map(c => `
-                <div onclick="openCountryDetail(${c.id})" class="glass-card glass-card-hover p-4 rounded-2xl flex items-center justify-between transition-all">
+                <div onclick="openCountryDetail(${{c.id}})" class="glass-card glass-card-hover p-4 rounded-2xl flex items-center justify-between transition-all">
                     <div class="flex items-center space-x-3.5">
-                        <span class="text-3xl">${c.flag}</span>
+                        <span class="text-3xl">${{c.flag}}</span>
                         <div>
-                            <div class="font-bold text-sm text-white">${c.name}</div>
-                            <div class="text-[11px] text-slate-400 font-mono">${c.stock} accounts</div>
+                            <div class="font-bold text-sm text-white">${{c.name}}</div>
+                            <div class="text-[11px] text-slate-400 font-mono">${{c.stock}} accounts</div>
                         </div>
                     </div>
                     <div class="text-right">
-                        <div class="font-bold text-xs text-emerald-400 font-mono">From $${c.min_price.toFixed(2)}</div>
+                        <div class="font-bold text-xs text-emerald-400 font-mono">From $${{c.min_price.toFixed(2)}}</div>
                     </div>
                 </div>
             `).join('');
-        }
+        }}
 
-        function filterCountries() {
+        function filterCountries() {{
             const q = document.getElementById('search-country').value.toLowerCase();
             renderCountries(allCountries.filter(c => c.name.toLowerCase().includes(q)));
-        }
+        }}
 
-        async function openCountryDetail(cid) {
+        async function openCountryDetail(cid) {{
             selectedCountryId = cid;
-            try {
+            try {{
                 const data = await fetchAPI('/countries/' + cid);
                 document.getElementById('detail-flag').innerText = data.flag;
                 document.getElementById('detail-country-name').innerText = data.name;
 
-                document.getElementById('fresh-stock-info').innerText = `Available: ${data.fresh.count} | Price: $${data.fresh.price.toFixed(2)}`;
-                document.getElementById('broken-stock-info').innerText = `Available: ${data.broken.count} | Price: $${data.broken.price.toFixed(2)}`;
+                document.getElementById('fresh-stock-info').innerText = `Available: ${{data.fresh.count}} | Price: $${{data.fresh.price.toFixed(2)}}`;
+                document.getElementById('broken-stock-info').innerText = `Available: ${{data.broken.count}} | Price: $${{data.broken.price.toFixed(2)}}`;
 
                 switchTab('country-detail');
-            } catch (e) { alert(e.message); }
-        }
+            }} catch (e) {{ alert(e.message); }}
+        }}
 
-        function openPurchaseModal(grade) {
+        function openPurchaseModal(grade) {{
             selectedGrade = grade;
             const cName = document.getElementById('detail-country-name').innerText;
             const price = grade === 'fresh' 
@@ -1123,72 +1034,108 @@ HTML_CONTENT = """<!DOCTYPE html>
             document.getElementById('modal-quality').innerText = grade === 'fresh' ? 'Spam-Free' : 'Spam Grade';
             document.getElementById('modal-price').innerText = price;
             document.getElementById('purchase-modal').classList.remove('hidden');
-        }
+        }}
 
-        function closeModal() {
+        function closeModal() {{
             document.getElementById('purchase-modal').classList.add('hidden');
-        }
+        }}
 
-        async function confirmPurchase() {
+        async function confirmPurchase() {{
             closeModal();
-            try {
-                const res = await fetchAPI('/purchase', {
+            try {{
+                const res = await fetchAPI('/purchase', {{
                     method: 'POST',
-                    headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({ country_id: selectedCountryId, grade: selectedGrade })
-                });
+                    headers: {{ 'Content-Type': 'application/json' }},
+                    body: JSON.stringify({{ country_id: selectedCountryId, grade: selectedGrade }})
+                }});
                 if (tg.HapticFeedback) tg.HapticFeedback.notificationOccurred('success');
-                alert(`🎉 Purchase Successful!\nOrder ID: ${res.order_id}\nProduct: ${res.product_id}`);
+                alert(`🎉 Purchase Successful!\nOrder ID: ${{res.order_id}}\nProduct: ${{res.product_id}}`);
                 currentUser.balance = res.new_balance;
                 updateUIUser();
                 switchTab('orders');
-            } catch (e) {
+            }} catch (e) {{
                 if (tg.HapticFeedback) tg.HapticFeedback.notificationOccurred('error');
                 alert('❌ ' + e.message);
-            }
-        }
+            }}
+        }}
 
-        async function loadPaymentMethods() {
-            try {
+        async function loadPaymentMethods() {{
+            try {{
                 const methods = await fetchAPI('/payment-methods');
                 const grid = document.getElementById('payment-methods-grid');
                 grid.innerHTML = Object.entries(methods).map(([key, val]) => `
-                    <button onclick="selectPaymentMethod('${key}')" class="glass-card glass-card-hover p-3.5 rounded-2xl flex flex-col items-center justify-center gap-1 hover:border-brand-500/50 transition-all">
-                        <span class="font-bold text-xs text-white">${val.name}</span>
-                        <span class="text-[10px] text-brand-400 font-mono">${val.ticker}</span>
+                    <button onclick="selectPaymentMethod('${{key}}')" class="glass-card glass-card-hover p-3.5 rounded-2xl flex flex-col items-center justify-center gap-1 hover:border-brand-500/50 transition-all">
+                        <span class="font-bold text-xs text-white">${{val.name}}</span>
+                        <span class="text-[10px] text-brand-400 font-mono">${{val.ticker}}</span>
                     </button>
                 `).join('');
-            } catch (e) { console.error(e); }
-        }
+            }} catch (e) {{ console.error(e); }}
+        }}
 
-        function selectPaymentMethod(key) {
+        function selectPaymentMethod(key) {{
             selectedPaymentMethod = key;
             document.getElementById('deposit-amount-section').classList.remove('hidden');
-        }
+        }}
 
-        function selectPresetAmount(amt) {
+        function selectPresetAmount(amt) {{
             document.getElementById('custom-deposit-amt').value = amt;
             generateInvoice();
-        }
+        }}
 
-        async function generateInvoice() {
+        async function generateInvoice() {{
             const amt = parseFloat(document.getElementById('custom-deposit-amt').value);
-            if (!amt || amt < 1.0) return alert('Minimum deposit is $1.00 USD');
-            try {
-                const inv = await fetchAPI('/deposit', {
+            if (!amt || amt < 4.50) return alert('Minimum deposit limit is $4.50 USD');
+            try {{
+                const inv = await fetchAPI('/deposit', {{
                     method: 'POST',
-                    headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({ method_key: selectedPaymentMethod, amount: amt })
-                });
+                    headers: {{ 'Content-Type': 'application/json' }},
+                    body: JSON.stringify({{ method_key: selectedPaymentMethod, amount: amt }})
+                }});
+                currentInvoiceDetails = inv;
                 document.getElementById('invoice-net').innerText = inv.network;
                 document.getElementById('invoice-code').innerText = inv.invoice_code;
-                document.getElementById('invoice-crypto').innerText = `${inv.crypto_amount} ${inv.ticker}`;
+                document.getElementById('invoice-crypto').innerText = `${{inv.crypto_amount}} ${{inv.ticker}}`;
                 document.getElementById('invoice-address').innerText = inv.address;
-                document.getElementById('invoice-section').classList.remove('hidden');
-            } catch (e) { alert(e.message); }
-        }
 
-        async function uploadProof(input) {
+                // Handle Memo / Tag visibility (e.g. USDT TON)
+                const memoBox = document.getElementById('memo-container');
+                if (inv.memo && inv.memo.trim() !== '') {{
+                    document.getElementById('invoice-memo').innerText = inv.memo;
+                    memoBox.classList.remove('hidden');
+                }} else {{
+                    memoBox.classList.add('hidden');
+                }}
+
+                document.getElementById('invoice-section').classList.remove('hidden');
+            }} catch (e) {{ alert(e.message); }}
+        }}
+
+        function exitAndSendProof() {{
+            if (!currentInvoiceDetails) return;
+            
+            const message = encodeURIComponent(
+                `📸 *PAYMENT RECEIPT SUBMISSION*\n\n` +
+                `*Invoice ID:* \`${{currentInvoiceDetails.invoice_code}}\`\n` +
+                `*Amount USD:* \`$${{currentInvoiceDetails.amount_usd.toFixed(2)}}\`\n` +
+                `*Network:* ${{currentInvoiceDetails.network}}\n` +
+                `*Expected:* \`${{currentInvoiceDetails.crypto_amount}} ${{currentInvoiceDetails.ticker}}\`\n\n` +
+                `_I have sent the payment. Here is my payment receipt/screenshot:_`
+            );
+
+            // Directly opens support / admin DM link with pre-formatted invoice reference
+            const supportUrl = currentUser?.support_url || "{DEVELOPER_SUPPORT_LINK}";
+            const fullLink = `${{supportUrl}}?text=${{message}}`;
+
+            if (tg.openTelegramLink) {{
+                tg.openTelegramLink(fullLink);
+            }} else {{
+                window.open(fullLink, '_blank');
+            }}
+
+            if (tg.close) tg.close();
+        }}
+
+        async function uploadProof(input) {{
             if (!input.files || !input.files[0]) return;
             const file = input.files[0];
             const invCode = document.getElementById('invoice-code').innerText;
@@ -1202,73 +1149,73 @@ HTML_CONTENT = """<!DOCTYPE html>
             formData.append('method_key', selectedPaymentMethod);
             formData.append('file', file);
 
-            try {
-                await fetchAPI('/deposit/proof', { method: 'POST', body: formData });
+            try {{
+                await fetchAPI('/deposit/proof', {{ method: 'POST', body: formData }});
                 alert('✅ Receipt sent to Telegram Admins! Your balance will update shortly.');
                 document.getElementById('invoice-section').classList.add('hidden');
-            } catch (e) { alert(e.message); }
-        }
+            }} catch (e) {{ alert(e.message); }}
+        }}
 
-        async function loadOrders() {
-            try {
+        async function loadOrders() {{
+            try {{
                 const orders = await fetchAPI('/orders');
                 const container = document.getElementById('orders-list');
-                if (!orders.length) {
+                if (!orders.length) {{
                     container.innerHTML = `<div class="text-center text-slate-500 py-8 text-xs font-medium">No purchase history found.</div>`;
                     return;
                 }
                 container.innerHTML = orders.map(o => `
                     <div class="glass-card p-4 rounded-2xl space-y-2 border-white/5">
                         <div class="flex justify-between items-center text-xs">
-                            <span class="font-mono text-slate-400">${o.order_id}</span>
-                            <span class="text-emerald-400 font-bold font-mono">$${o.amount.toFixed(2)}</span>
+                            <span class="font-mono text-slate-400">${{o.order_id}}</span>
+                            <span class="text-emerald-400 font-bold font-mono">$${{o.amount.toFixed(2)}}</span>
                         </div>
                         <div class="font-bold text-sm text-white flex items-center gap-2">
-                            <span>${o.flag}</span> <span>${o.quality}</span>
+                            <span>${{o.flag}}</span> <span>${{o.quality}}</span>
                         </div>
                         <div class="text-[11px] font-mono text-brand-300 bg-slate-900/90 p-2.5 rounded-xl break-all select-all border border-white/5">
-                            ${o.product_id}
+                            ${{o.product_id}}
                         </div>
                     </div>
                 `).join('');
-            } catch (e) { console.error(e); }
-        }
+            }} catch (e) {{ console.error(e); }}
+        }}
 
-        async function loadAdminDashboard() {
-            try {
+        async function loadAdminDashboard() {{
+            try {{
                 const countries = await fetchAPI('/countries');
-                document.getElementById('admin-country-select').innerHTML = countries.map(c => `<option value="${c.id}">${c.flag} ${c.name}</option>`).join('');
-            } catch (e) { console.error(e); }
-        }
+                document.getElementById('admin-country-select').innerHTML = countries.map(c => `<option value="${{c.id}}">${{c.flag}} ${{c.name}}</option>`).join('');
+            }} catch (e) {{ console.error(e); }}
+        }}
 
-        async function submitAdminStock() {
+        async function submitAdminStock() {{
             const cid = parseInt(document.getElementById('admin-country-select').value);
             const qual = document.getElementById('admin-quality-select').value;
             const price = parseFloat(document.getElementById('admin-price-input').value);
             const qty = parseInt(document.getElementById('admin-qty-input').value);
 
-            try {
-                await fetchAPI('/admin/stock', {
+            try {{
+                await fetchAPI('/admin/stock', {{
                     method: 'POST',
-                    headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({ country_id: cid, quality: qual, price: price, quantity: qty })
-                });
+                    headers: {{ 'Content-Type': 'application/json' }},
+                    body: JSON.stringify({{ country_id: cid, quality: qual, price: price, quantity: qty }})
+                }});
                 alert('✅ Stock successfully added to Database!');
-            } catch (e) { alert(e.message); }
-        }
+            }} catch (e) {{ alert(e.message); }}
+        }}
 
-        async function switchLanguage() {
+        async function switchLanguage() {{
             const nextLang = currentUser.language === 'ru' ? 'en' : 'ru';
-            try {
-                await fetchAPI('/language', {
+            try {{
+                await fetchAPI('/language', {{
                     method: 'POST',
-                    headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({ language: nextLang })
-                });
+                    headers: {{ 'Content-Type': 'application/json' }},
+                    body: JSON.stringify({{ language: nextLang }})
+                }});
                 currentUser.language = nextLang;
                 updateUIUser();
-            } catch (e) { console.error(e); }
-        }
+            }} catch (e) {{ console.error(e); }}
+        }}
 
         window.onload = initApp;
     </script>
