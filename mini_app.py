@@ -6,34 +6,17 @@ import json
 import logging
 import os
 import random
-import sys
 import urllib.parse
-from typing import Optional, List, Dict, Any, Union
+from typing import Optional, List, Dict, Any
 
-from fastapi import FastAPI, HTTPException, Header, Depends, UploadFile, File, Form, status, Query
+from fastapi import FastAPI, HTTPException, Header, Depends, UploadFile, File, Form, status, Query, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import HTMLResponse, JSONResponse, Response
 from motor.motor_asyncio import AsyncIOMotorClient
 import aiohttp
-from pydantic import BaseModel, Field
+from pydantic import BaseModel
 
-# --- AIOGRAM IMPORTS FOR FULL BOT ENGINE ---
-from aiogram import Bot, Dispatcher, Router, F, types
-from aiogram.filters import CommandStart, Command
-from aiogram.types import (
-    InlineKeyboardMarkup,
-    InlineKeyboardButton,
-    CallbackQuery,
-    Message,
-    BufferedInputFile,
-)
-from aiogram.enums import ParseMode
-from aiogram.client.default import DefaultBotProperties
-
-# ==============================================================================
-# CONFIGURATION & ENVIRONMENT SETUP
-# ==============================================================================
-
+# --- IMPORT CONFIGURATION FROM CONFIG.PY ---
 try:
     from config import (
         BOT_TOKEN,
@@ -46,74 +29,52 @@ try:
         TEXTS,
     )
 except ImportError:
-    BOT_TOKEN = os.getenv("BOT_TOKEN", "123456789:AAA_DEFAULT_MOCK_TOKEN")
-    ADMIN_IDS = [int(i) for i in os.getenv("ADMIN_IDS", "123456789").split(",") if i.isdigit()]
-    MONGO_URI = os.getenv("MONGO_URI", "mongodb://localhost:27017")
-    DATABASE_NAME = os.getenv("DATABASE_NAME", "digital_store")
-    DEVELOPER_SUPPORT_LINK = os.getenv("DEVELOPER_SUPPORT_LINK", "https://t.me/support")
+    BOT_TOKEN = os.getenv("BOT_TOKEN", "8863940881:AAFtqtpfrdcMQbHzIM8j1FJUYltVHZABF-o")
+    ADMIN_IDS = [7952327997, 7953147643, 8064493735, 7123919486]
+    MONGO_URI = os.getenv("MONGO_URI", "mongodb+srv://Gopaljichoubey:gopaljichoubey12@cluster0.qlsuf4o.mongodb.net/?appName=Cluster0")
+    DATABASE_NAME = os.getenv("DATABASE_NAME", "marketplace_db")
+    DEVELOPER_SUPPORT_LINK = "https://t.me/support"
     PAYMENT_METHODS = {
-        "usdt_trc20": {
-            "name": "USDT (TRC20)",
+        "usdt_bep20": {
+            "name": "USDT (BEP-20)",
             "ticker": "USDT",
             "coingecko_id": "tether",
-            "address": "T1234567890ABCDEF1234567890ABCDEF",
+            "address": "0xC902874FE3A7fc30C792E17b75454eb7f4ce0dfE",
             "memo": "",
         },
-        "ton": {
-            "name": "TON (Toncoin)",
-            "ticker": "TON",
-            "coingecko_id": "the-open-network",
-            "address": "EQD1234567890ABCDEF1234567890ABCDEF",
-            "memo": "10001",
-        },
-        "btc": {
-            "name": "Bitcoin (BTC)",
-            "ticker": "BTC",
-            "coingecko_id": "bitcoin",
-            "address": "bc1q1234567890abcdef1234567890abcdef",
+        "usdt_erc20": {
+            "name": "USDT (ERC-20)",
+            "ticker": "USDT",
+            "coingecko_id": "tether",
+            "address": "0xC902874FE3A7fc30C792E17b75454eb7f4ce0dfE",
             "memo": "",
         },
-        "eth": {
-            "name": "Ethereum (ETH)",
-            "ticker": "ETH",
-            "coingecko_id": "ethereum",
-            "address": "0x1234567890ABCDEF1234567890ABCDEF",
+        "usdt_poly": {
+            "name": "USDT (Polygon)",
+            "ticker": "USDT",
+            "coingecko_id": "tether",
+            "address": "0xC902874FE3A7fc30C792E17b75454eb7f4ce0dfE",
             "memo": "",
         },
-    }
-    FALLBACK_PRICES = {
-        "tether": 1.0,
-        "the-open-network": 5.50,
-        "bitcoin": 60000.0,
-        "ethereum": 3000.0,
-    }
-    TEXTS = {
-        "ru": {
-            "welcome": "👋 Добро пожаловать в Digital Store Mini App!",
-            "balance": "💰 Ваш баланс: ${balance:.2f}",
-            "approved": "✅ Ваша заявка на пополнение #{topup_id} на сумму ${amount:.2f} успешно одобрена!",
-            "rejected": "❌ Ваша заявка на пополнение #{topup_id} была отклонена администратором.",
-        },
-        "en": {
-            "welcome": "👋 Welcome to Digital Store Mini App!",
-            "balance": "💰 Your balance: ${balance:.2f}",
-            "approved": "✅ Your top-up request #{topup_id} for ${amount:.2f} has been approved!",
-            "rejected": "❌ Your top-up request #{topup_id} was rejected by the administrator.",
+        "usdt_ton": {
+            "name": "USDT (TON)",
+            "ticker": "USDT",
+            "coingecko_id": "tether",
+            "address": "EQAj7vKLbaWjaNbAuAKP1e1HwmdYZ2vJ2xtWU8qq3JafkfxF",
+            "memo": "1481661",
         },
     }
+    FALLBACK_PRICES = {"tether": 1.0}
+    TEXTS = {"ru": {}, "en": {}}
 
-# Logging configuration
+# Set up logging
 logging.basicConfig(
     level=logging.INFO,
-    format="%(asctime)s - %(name)s - %(levelname)s - [%(levelname)s] - %(message)s",
-    handlers=[logging.StreamHandler(sys.stdout)],
+    format="%(asctime)s - %(name)s - %(levelname)s - [%(levelname)s] - %(message)s"
 )
-logger = logging.getLogger("digital_store_ultra")
+logger = logging.getLogger("digital_store_miniapp")
 
-# ==============================================================================
-# MONGODB DATABASE ENGINE
-# ==============================================================================
-
+# --- MONGODB CONNECTION ---
 mongo_client = AsyncIOMotorClient(MONGO_URI)
 db = mongo_client[DATABASE_NAME]
 
@@ -122,29 +83,9 @@ countries_col = db["countries"]
 products_col = db["products"]
 orders_col = db["orders"]
 topups_col = db["topups"]
-logs_col = db["system_logs"]
 
-# ==============================================================================
-# AIOGRAM BOT INITIALIZATION
-# ==============================================================================
-
-bot = Bot(
-    token=BOT_TOKEN,
-    default=DefaultBotProperties(parse_mode=ParseMode.HTML)
-)
-dp = Dispatcher()
-bot_router = Router()
-dp.include_router(bot_router)
-
-# ==============================================================================
-# FASTAPI APP INITIALIZATION
-# ==============================================================================
-
-app = FastAPI(
-    title="Digital Store Ultra Master Engine",
-    version="3.0.0",
-    description="Combined FastAPI Backend, Telegram Mini App Frontend, and Bot Engine",
-)
+# Initialize FastAPI App
+app = FastAPI(title="Digital Store Ultra Mini App", version="3.0.0")
 
 app.add_middleware(
     CORSMiddleware,
@@ -154,94 +95,240 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# ==============================================================================
-# UTILITY FUNCTIONS & PRICE FETCHERS
-# ==============================================================================
+# --- HELPER: TELEGRAM BOT NOTIFIER & APPROVAL SYSTEM ---
 
-async def log_event(event_type: str, details: Dict[str, Any]):
-    """Logs system events to MongoDB."""
-    try:
-        await logs_col.insert_one({
-            "event_type": event_type,
-            "details": details,
-            "timestamp": datetime.datetime.utcnow()
-        })
-    except Exception as e:
-        logger.error(f"Failed to log event {event_type}: {e}")
+async def send_telegram_admin_approval_request(
+    topup_id: str,
+    user_id: int,
+    username: str,
+    first_name: str,
+    amount_usd: float,
+    crypto_amount: str,
+    method_name: str,
+    photo_bytes: bytes,
+    filename: str = "receipt.jpg"
+):
+    """
+    Sends payment proof and interactive inline approval buttons directly to Admin Telegram Chat(s).
+    """
+    if BOT_TOKEN.startswith("123456789") or "MOCK" in BOT_TOKEN:
+        logger.warning("Using mock BOT_TOKEN. Skipping real Telegram message dispatch.")
+        return
 
-async def get_crypto_price_usd(coin_id: str) -> float:
-    """Fetches live crypto conversion rates from CoinGecko API with fallback support."""
-    if not coin_id or coin_id == "tether":
-        return 1.0
-    url = f"https://api.coingecko.com/api/v3/simple/price?ids={coin_id}&vs_currencies=usd"
+    caption = (
+        f"🚨 <b>NEW DEPOSIT PROOF SUBMITTED</b> 🚨\n"
+        f"═══════════════════════\n\n"
+        f"🆔 <b>Invoice ID:</b> <code>{topup_id}</code>\n"
+        f"👤 <b>User:</b> {first_name} (@{username})\n"
+        f"🔢 <b>Telegram ID:</b> <code>{user_id}</code>\n"
+        f"💵 <b>Amount USD:</b> <code>${amount_usd:.2f}</code>\n"
+        f"🪙 <b>Crypto Detail:</b> <code>{crypto_amount}</code> ({method_name})\n\n"
+        f"👇 <b>Use buttons below to instantly approve or reject:</b>"
+    )
+
+    inline_keyboard = {
+        "inline_keyboard": [
+            [
+                {
+                    "text": f"✅ Approve (${amount_usd:.2f})",
+                    "callback_data": f"approve_topup:{topup_id}:{user_id}:{amount_usd}"
+                },
+                {
+                    "text": "❌ Reject",
+                    "callback_data": f"reject_topup:{topup_id}:{user_id}"
+                }
+            ]
+        ]
+    }
+
+    async with aiohttp.ClientSession() as session:
+        for admin_id in ADMIN_IDS:
+            try:
+                url = f"https://api.telegram.org/bot{BOT_TOKEN}/sendPhoto"
+                data = aiohttp.FormData()
+                data.add_field("chat_id", str(admin_id))
+                data.add_field("caption", caption, parse_mode="HTML")
+                data.add_field("reply_markup", json.dumps(inline_keyboard))
+                data.add_field("photo", photo_bytes, filename=filename, content_type="image/jpeg")
+                
+                async with session.post(url, data=data) as resp:
+                    res = await resp.json()
+                    if not res.get("ok"):
+                        logger.error(f"Failed to send photo to admin {admin_id}: {res}")
+            except Exception as e:
+                logger.error(f"Exception sending admin notification to {admin_id}: {e}")
+
+async def send_telegram_user_message(user_id: int, text: str):
+    """Helper to send a direct message to a specific Telegram user."""
+    if BOT_TOKEN.startswith("123456789"):
+        return
+    url = f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage"
+    payload = {"chat_id": user_id, "text": text, "parse_mode": "HTML"}
     try:
         async with aiohttp.ClientSession() as session:
-            async with session.get(url, timeout=5) as resp:
-                if resp.status == 200:
-                    data = await resp.json()
-                    return float(data[coin_id]["usd"])
+            await session.post(url, json=payload)
     except Exception as e:
-        logger.warning(f"Failed to fetch live price for {coin_id}: {e}. Utilizing fallback dataset.")
-    return FALLBACK_PRICES.get(coin_id, 1.0)
+        logger.error(f"Failed sending user message to {user_id}: {e}")
 
-# ==============================================================================
-# TELEGRAM AUTHENTICATION & SECURITY PROTOCOL
-# ==============================================================================
+# --- TELEGRAM WEBHOOK HANDLER FOR INLINE BUTTON ACTIONS ---
+
+@app.post("/api/telegram/webhook")
+async def telegram_webhook(request: Request):
+    """
+    Handles inline button callback queries from admins approving/rejecting top-ups.
+    """
+    try:
+        update = await request.json()
+        if "callback_query" not in update:
+            return {"status": "ignored"}
+
+        cq = update["callback_query"]
+        cq_id = cq["id"]
+        from_id = cq["from"]["id"]
+        data = cq.get("data", "")
+        message = cq.get("message", {})
+        chat_id = message.get("chat", {}).get("id")
+        message_id = message.get("message_id")
+
+        if from_id not in ADMIN_IDS:
+            async with aiohttp.ClientSession() as session:
+                await session.post(f"https://api.telegram.org/bot{BOT_TOKEN}/answerCallbackQuery", json={
+                    "callback_query_id": cq_id,
+                    "text": "❌ Unauthorized access.",
+                    "show_alert": True
+                })
+            return {"status": "unauthorized"}
+
+        if data.startswith("approve_topup:"):
+            _, topup_id, user_id_str, amount_str = data.split(":")
+            user_id = int(user_id_str)
+            amount = float(amount_str)
+
+            topup = await topups_col.find_one({"topup_id": topup_id})
+            if not topup:
+                alert_text = "❌ Transaction not found."
+            elif topup.get("status") == "approved":
+                alert_text = "⚠️ Deposit was already approved!"
+            else:
+                # Atomically update top-up and credit user balance
+                await topups_col.update_one({"topup_id": topup_id}, {"$set": {"status": "approved", "approved_by": from_id, "approved_at": datetime.datetime.utcnow()}})
+                await users_col.update_one({"telegram_id": user_id}, {"$inc": {"balance": amount}})
+                
+                # Notify User
+                await send_telegram_user_message(
+                    user_id,
+                    f"🎉 <b>DEPOSIT APPROVED!</b>\n\n💰 Your wallet has been credited with <b>${amount:.2f} USD</b>.\nThank you for choosing our marketplace!"
+                )
+                alert_text = f"✅ Approved! ${amount:.2f} credited to user {user_id}."
+
+                # Edit Admin Message Caption
+                new_caption = (
+                    f"{message.get('caption', '')}\n\n"
+                    f"✅ <b>STATUS: APPROVED</b>\n"
+                    f"👨‍💻 <b>Approved By Admin:</b> <code>{from_id}</code>\n"
+                    f"🕒 <b>Time:</b> {datetime.datetime.utcnow().strftime('%Y-%m-%d %H:%M UTC')}"
+                )
+                async with aiohttp.ClientSession() as session:
+                    await session.post(f"https://api.telegram.org/bot{BOT_TOKEN}/editMessageCaption", json={
+                        "chat_id": chat_id,
+                        "message_id": message_id,
+                        "caption": new_caption,
+                        "parse_mode": "HTML",
+                        "reply_markup": {"inline_keyboard": []}
+                    })
+
+            async with aiohttp.ClientSession() as session:
+                await session.post(f"https://api.telegram.org/bot{BOT_TOKEN}/answerCallbackQuery", json={
+                    "callback_query_id": cq_id,
+                    "text": alert_text,
+                    "show_alert": True
+                })
+
+        elif data.startswith("reject_topup:"):
+            _, topup_id, user_id_str = data.split(":")
+            user_id = int(user_id_str)
+
+            await topups_col.update_one({"topup_id": topup_id}, {"$set": {"status": "rejected", "rejected_by": from_id}})
+            await send_telegram_user_message(
+                user_id,
+                f"❌ <b>DEPOSIT REJECTED</b>\n\nYour recent transaction proof (ID: <code>{topup_id}</code>) was declined by support. Please contact support if you believe this is an error."
+            )
+
+            new_caption = (
+                f"{message.get('caption', '')}\n\n"
+                f"❌ <b>STATUS: REJECTED</b>\n"
+                f"👨‍💻 <b>Rejected By Admin:</b> <code>{from_id}</code>"
+            )
+            async with aiohttp.ClientSession() as session:
+                await session.post(f"https://api.telegram.org/bot{BOT_TOKEN}/editMessageCaption", json={
+                    "chat_id": chat_id,
+                    "message_id": message_id,
+                    "caption": new_caption,
+                    "parse_mode": "HTML",
+                    "reply_markup": {"inline_keyboard": []}
+                })
+                await session.post(f"https://api.telegram.org/bot{BOT_TOKEN}/answerCallbackQuery", json={
+                    "callback_query_id": cq_id,
+                    "text": "❌ Deposit proof rejected.",
+                    "show_alert": True
+                })
+
+        return {"status": "ok"}
+    except Exception as e:
+        logger.error(f"Error handling Telegram webhook: {e}")
+        return {"status": "error", "message": str(e)}
+
+# --- AUTHENTICATION & SECURITY ---
 
 def verify_telegram_init_data(init_data: str) -> dict:
-    """
-    Validates HMAC SHA-256 signature for Telegram WebApp InitData payloads.
-    Provides sandbox mock environment when testing with dynamic fallback tokens.
-    """
     if not init_data:
         return {
             "id": 999999999,
-            "first_name": "Demo Sandbox",
-            "last_name": "User",
+            "first_name": "Demo User",
+            "last_name": "",
             "username": "demouser",
-            "language_code": "en",
+            "language_code": "en"
         }
-
+    
     try:
         parsed_data = dict(urllib.parse.parse_qsl(init_data, keep_blank_values=True))
         if "hash" not in parsed_data:
             return {
                 "id": 999999999,
-                "first_name": "Preview Account",
+                "first_name": "Preview User",
                 "last_name": "",
-                "username": "preview_user",
-                "language_code": "en",
+                "username": "preview",
+                "language_code": "en"
             }
 
         hash_check = parsed_data.pop("hash")
         data_check_string = "\n".join(f"{k}={v}" for k, v in sorted(parsed_data.items()))
-
+        
         secret_key = hmac.new(b"WebAppData", BOT_TOKEN.encode("utf-8"), hashlib.sha256).digest()
         calculated_hash = hmac.new(secret_key, data_check_string.encode("utf-8"), hashlib.sha256).hexdigest()
 
         if calculated_hash.lower() != hash_check.lower():
             if BOT_TOKEN.startswith("123456789"):
                 return json.loads(parsed_data.get("user", "{}"))
-            raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid HMAC signature.")
+            raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid HMAC security signature.")
 
         if "user" not in parsed_data:
-            raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="User missing in payload.")
+            raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Missing user field in payload.")
 
         return json.loads(parsed_data["user"])
 
     except HTTPException:
         raise
     except Exception as e:
-        logger.error(f"Telegram Auth Exception: {e}")
+        logger.error(f"Auth verification failure: {e}")
         return {
             "id": 888888888,
             "first_name": "Telegram User",
             "username": "tg_user",
-            "language_code": "ru",
+            "language_code": "ru"
         }
 
 async def get_current_user(x_telegram_init_data: Optional[str] = Header(None)) -> dict:
-    """Dependency injection to resolve and authenticate current user via request header."""
     tg_user = verify_telegram_init_data(x_telegram_init_data or "")
     telegram_id = tg_user.get("id", 999999999)
     username = tg_user.get("username", "N/A")
@@ -257,291 +344,43 @@ async def get_current_user(x_telegram_init_data: Optional[str] = Header(None)) -
             "balance": 0.00,
             "photo_url": "",
             "is_blocked": 0,
-            "created_at": datetime.datetime.utcnow(),
+            "created_at": datetime.datetime.utcnow()
         }
         await users_col.insert_one(user)
     else:
         await users_col.update_one(
             {"telegram_id": telegram_id},
-            {"$set": {"first_name": first_name, "username": username}},
+            {"$set": {"first_name": first_name, "username": username}}
         )
 
     if user.get("is_blocked"):
-        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="User account blocked.")
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="User account is blocked.")
 
     return user
 
 async def get_admin_user(current_user: dict = Depends(get_current_user)) -> dict:
-    """Verifies whether current active user possesses Administrative privileges."""
     if current_user["telegram_id"] not in ADMIN_IDS and current_user["telegram_id"] != 999999999:
-        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Access denied. Admin rights required.")
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Admin access denied.")
     return current_user
 
-# ==============================================================================
-# DISPATCH & PAYMENT PROOF NOTIFICATION ENGINE
-# ==============================================================================
-
-async def dispatch_payment_proof_to_admins(
-    topup_id: str,
-    user_id: int,
-    username: str,
-    first_name: str,
-    amount_usd: float,
-    crypto_amount: str,
-    method_name: str,
-    photo_bytes: bytes,
-    filename: str = "receipt.jpg",
-):
-    """
-    Submits uploaded payment receipt photo directly to Admin Telegram Chat(s).
-    Includes interactive inline buttons for immediate Approval or Rejection.
-    """
-    if BOT_TOKEN.startswith("123456789"):
-        logger.warning("Mock Token detected. Skipping real Telegram admin dispatch.")
-        return
-
-    caption = (
-        f"🚨 <b>NEW DEPOSIT PROOF SUBMITTED</b> 🚨\n\n"
-        f"<b>Invoice ID:</b> <code>{topup_id}</code>\n"
-        f"<b>User:</b> {first_name} (@{username})\n"
-        f"<b>Telegram ID:</b> <code>{user_id}</code>\n"
-        f"<b>Amount USD:</b> <code>${amount_usd:.2f}</code>\n"
-        f"<b>Crypto Amount:</b> <code>{crypto_amount}</code>\n"
-        f"<b>Payment Method:</b> {method_name}\n\n"
-        f"⚡ <i>Click buttons below to instantly process user balance:</i>"
-    )
-
-    reply_markup = InlineKeyboardMarkup(
-        inline_keyboard=[
-            [
-                InlineKeyboardButton(
-                    text="✅ Approve & Credit", callback_data=f"approve_topup:{topup_id}"
-                ),
-                InlineKeyboardButton(
-                    text="❌ Reject Payment", callback_data=f"reject_topup:{topup_id}"
-                ),
-            ]
-        ]
-    )
-
-    photo_file = BufferedInputFile(photo_bytes, filename=filename)
-
-    for admin_id in ADMIN_IDS:
-        try:
-            await bot.send_photo(
-                chat_id=admin_id,
-                photo=photo_file,
-                caption=caption,
-                reply_markup=reply_markup,
-            )
-            logger.info(f"Payment proof photo successfully dispatched to admin {admin_id}")
-        except Exception as e:
-            logger.error(f"Failed to dispatch payment proof photo to admin {admin_id}: {e}")
-
-# ==============================================================================
-# AIOGRAM BOT HANDLERS & CALLBACKS
-# ==============================================================================
-
-@bot_router.message(CommandStart())
-async def cmd_start_handler(message: Message):
-    """Handles /start command, registers user if missing, and sends welcome message."""
-    user_id = message.from_user.id
-    username = message.from_user.username or "N/A"
-    first_name = message.from_user.first_name or "User"
-
-    user = await users_col.find_one({"telegram_id": user_id})
-    if not user:
-        user = {
-            "telegram_id": user_id,
-            "username": username,
-            "first_name": first_name,
-            "language": "ru",
-            "balance": 0.00,
-            "photo_url": "",
-            "is_blocked": 0,
-            "created_at": datetime.datetime.utcnow(),
-        }
-        await users_col.insert_one(user)
-
-    lang = user.get("language", "ru")
-    welcome_text = TEXTS.get(lang, TEXTS["en"]).get("welcome", "Welcome!")
-
-    kb = InlineKeyboardMarkup(
-        inline_keyboard=[
-            [
-                InlineKeyboardButton(
-                    text="🚀 Launch Digital Store Mini App",
-                    web_app=types.WebAppInfo(url=f"https://t.me/your_bot/app"),
-                )
-            ],
-            [
-                InlineKeyboardButton(
-                    text="💬 Developer Support", url=DEVELOPER_SUPPORT_LINK
-                )
-            ],
-        ]
-    )
-
-    await message.answer(
-        f"{welcome_text}\n\n💰 <b>Balance:</b> ${user.get('balance', 0.0):.2f}\n🆔 <b>ID:</b> <code>{user_id}</code>",
-        reply_markup=kb,
-    )
-
-@bot_router.message(Command("balance"))
-async def cmd_balance_handler(message: Message):
-    """Handles /balance command."""
-    user_id = message.from_user.id
-    user = await users_col.find_one({"telegram_id": user_id})
-    balance = user.get("balance", 0.0) if user else 0.0
-    await message.answer(f"💳 <b>Your Current Account Balance:</b> <code>${balance:.2f} USD</code>")
-
-@bot_router.message(Command("addbalance"))
-async def cmd_addbalance_handler(message: Message):
-    """Admin manual command: /addbalance <telegram_id> <amount>"""
-    if message.from_user.id not in ADMIN_IDS:
-        return
-
-    args = message.text.split()
-    if len(args) < 3:
-        await message.answer("⚠️ Usage: <code>/addbalance <user_id> <amount></code>")
-        return
-
+async def get_crypto_price_usd(coin_id: str) -> float:
+    if not coin_id or coin_id == "tether":
+        return 1.0
+    url = f"https://api.coingecko.com/api/v3/simple/price?ids={coin_id}&vs_currencies=usd"
     try:
-        target_user_id = int(args[1])
-        amount = float(args[2])
-
-        res = await users_col.update_one(
-            {"telegram_id": target_user_id},
-            {"$inc": {"balance": amount}}
-        )
-
-        if res.modified_count > 0:
-            await message.answer(f"✅ Successfully added <code>${amount:.2f}</code> to user <code>{target_user_id}</code>.")
-            try:
-                await bot.send_message(
-                    chat_id=target_user_id,
-                    text=f"🎉 <b>Balance Updated!</b> An admin credited <code>${amount:.2f}</code> to your account.",
-                )
-            except Exception as e:
-                logger.warning(f"Could not notify user {target_user_id}: {e}")
-        else:
-            await message.answer("❌ User not found in database.")
-    except ValueError:
-        await message.answer("❌ Invalid User ID or Amount format.")
-
-@bot_router.callback_query(F.data.startswith("approve_topup:"))
-async def process_approve_topup_callback(callback: CallbackQuery):
-    """
-    Handles Inline Approval Button clicked by Admin in Telegram.
-    Updates MongoDB record status, credits user balance atomically, and notifies the user.
-    """
-    if callback.from_user.id not in ADMIN_IDS:
-        await callback.answer("❌ Access denied. Admin rights required.", show_alert=True)
-        return
-
-    topup_id = callback.data.split(":")[1]
-    topup_doc = await topups_col.find_one({"topup_id": topup_id})
-
-    if not topup_doc:
-        await callback.answer("❌ Top-up invoice not found in database.", show_alert=True)
-        return
-
-    if topup_doc.get("status") == "approved":
-        await callback.answer("⚠️ This transaction was already approved!", show_alert=True)
-        return
-
-    if topup_doc.get("status") == "rejected":
-        await callback.answer("⚠️ This transaction was already rejected!", show_alert=True)
-        return
-
-    user_id = topup_doc["user_id"]
-    amount = float(topup_doc["amount"])
-
-    # Atomic Balance Increment & Status Update
-    await topups_col.update_one(
-        {"topup_id": topup_id},
-        {"$set": {"status": "approved", "processed_at": datetime.datetime.utcnow()}},
-    )
-
-    await users_col.update_one(
-        {"telegram_id": user_id},
-        {"$inc": {"balance": amount}},
-    )
-
-    await log_event("topup_approved", {"topup_id": topup_id, "user_id": user_id, "amount": amount})
-
-    # Update Admin Message
-    new_caption = callback.message.caption + f"\n\n✅ <b>APPROVED BY ADMIN</b> (@{callback.from_user.username or callback.from_user.id})"
-    try:
-        await callback.message.edit_caption(caption=new_caption, reply_markup=None)
+        async with aiohttp.ClientSession() as session:
+            async with session.get(url, timeout=5) as resp:
+                if resp.status == 200:
+                    data = await resp.json()
+                    return float(data[coin_id]["usd"])
     except Exception as e:
-        logger.error(f"Failed to update admin message caption: {e}")
+        logger.warning(f"Failed to fetch live price for {coin_id}: {e}. Using fallback.")
+    return FALLBACK_PRICES.get(coin_id, 1.0)
 
-    await callback.answer("✅ Deposit approved & balance credited successfully!", show_alert=True)
-
-    # Notify User via Bot
-    try:
-        user_doc = await users_col.find_one({"telegram_id": user_id})
-        lang = user_doc.get("language", "ru") if user_doc else "ru"
-        msg_template = TEXTS.get(lang, TEXTS["en"]).get("approved", "✅ Your deposit #{topup_id} of ${amount:.2f} was approved!")
-        formatted_msg = msg_template.format(topup_id=topup_id, amount=amount)
-
-        await bot.send_message(chat_id=user_id, text=formatted_msg)
-    except Exception as e:
-        logger.error(f"Failed to notify user {user_id} regarding top-up approval: {e}")
-
-@bot_router.callback_query(F.data.startswith("reject_topup:"))
-async def process_reject_topup_callback(callback: CallbackQuery):
-    """Handles Inline Rejection Button clicked by Admin in Telegram."""
-    if callback.from_user.id not in ADMIN_IDS:
-        await callback.answer("❌ Access denied. Admin rights required.", show_alert=True)
-        return
-
-    topup_id = callback.data.split(":")[1]
-    topup_doc = await topups_col.find_one({"topup_id": topup_id})
-
-    if not topup_doc:
-        await callback.answer("❌ Top-up invoice not found.", show_alert=True)
-        return
-
-    if topup_doc.get("status") != "pending":
-        await callback.answer(f"⚠️ Transaction is already {topup_doc.get('status')}.", show_alert=True)
-        return
-
-    await topups_col.update_one(
-        {"topup_id": topup_id},
-        {"$set": {"status": "rejected", "processed_at": datetime.datetime.utcnow()}},
-    )
-
-    await log_event("topup_rejected", {"topup_id": topup_id, "user_id": topup_doc["user_id"]})
-
-    new_caption = callback.message.caption + f"\n\n❌ <b>REJECTED BY ADMIN</b> (@{callback.from_user.username or callback.from_user.id})"
-    try:
-        await callback.message.edit_caption(caption=new_caption, reply_markup=None)
-    except Exception as e:
-        logger.error(f"Failed to update caption on reject: {e}")
-
-    await callback.answer("❌ Deposit proof rejected.", show_alert=True)
-
-    # Notify User
-    try:
-        user_id = topup_doc["user_id"]
-        user_doc = await users_col.find_one({"telegram_id": user_id})
-        lang = user_doc.get("language", "ru") if user_doc else "ru"
-        msg_template = TEXTS.get(lang, TEXTS["en"]).get("rejected", "❌ Deposit #{topup_id} was rejected.")
-        formatted_msg = msg_template.format(topup_id=topup_id)
-
-        await bot.send_message(chat_id=user_id, text=formatted_msg)
-    except Exception as e:
-        logger.error(f"Failed to notify user {user_id} regarding rejection: {e}")
-
-# ==============================================================================
-# FASTAPI USER AVATAR PROXY ENDPOINT
-# ==============================================================================
+# --- TELEGRAM USER AVATAR PROXY ---
 
 @app.get("/api/user/avatar/{user_id}")
 async def get_user_avatar_proxy(user_id: int):
-    """Proxies Telegram user profile avatar images with SVG fallback."""
     if BOT_TOKEN.startswith("123456789"):
         svg = f'''<svg xmlns="http://www.w3.org/2000/svg" width="100" height="100" viewBox="0 0 100 100">
             <defs>
@@ -556,15 +395,23 @@ async def get_user_avatar_proxy(user_id: int):
         return Response(content=svg, media_type="image/svg+xml")
 
     try:
-        user_photos = await bot.get_user_profile_photos(user_id=user_id, limit=1)
-        if not user_photos.photos:
-            raise Exception("No profile photo available")
-
-        file_id = user_photos.photos[0][0].file_id
-        file_info = await bot.get_file(file_id)
-
         async with aiohttp.ClientSession() as session:
-            download_url = f"https://api.telegram.org/file/bot{BOT_TOKEN}/{file_info.file_path}"
+            photos_url = f"https://api.telegram.org/bot{BOT_TOKEN}/getUserProfilePhotos?user_id={user_id}&limit=1"
+            async with session.get(photos_url) as resp:
+                data = await resp.json()
+                if not data.get("ok") or not data.get("result", {}).get("photos"):
+                    raise Exception("No profile photo found")
+                
+                file_id = data["result"]["photos"][0][0]["file_id"]
+
+            file_info_url = f"https://api.telegram.org/bot{BOT_TOKEN}/getFile?file_id={file_id}"
+            async with session.get(file_info_url) as resp:
+                file_data = await resp.json()
+                if not file_data.get("ok"):
+                    raise Exception("File path retrieval failed")
+                file_path = file_data["result"]["file_path"]
+
+            download_url = f"https://api.telegram.org/file/bot{BOT_TOKEN}/{file_path}"
             async with session.get(download_url) as resp:
                 img_bytes = await resp.read()
                 content_type = resp.headers.get("Content-Type", "image/jpeg")
@@ -577,9 +424,7 @@ async def get_user_avatar_proxy(user_id: int):
         </svg>'''
         return Response(content=svg, media_type="image/svg+xml")
 
-# ==============================================================================
-# PYDANTIC DATA MODELS & SCHEMAS
-# ==============================================================================
+# --- PYDANTIC SCHEMAS ---
 
 class PurchaseRequest(BaseModel):
     country_id: int
@@ -587,7 +432,7 @@ class PurchaseRequest(BaseModel):
 
 class DepositRequest(BaseModel):
     method_key: str
-    amount: float = Field(..., gt=0)
+    amount: float
 
 class LanguageRequest(BaseModel):
     language: str
@@ -595,12 +440,14 @@ class LanguageRequest(BaseModel):
 class AdminAddStockRequest(BaseModel):
     country_id: int
     quality: str
-    price: float = Field(..., gt=0)
-    quantity: int = Field(..., gt=0)
+    price: float
+    quantity: int
 
-# ==============================================================================
-# FASTAPI API ENDPOINTS
-# ==============================================================================
+class AdminManualCreditRequest(BaseModel):
+    target_user_id: int
+    amount: float
+
+# --- API ENDPOINTS ---
 
 @app.get("/api/me")
 async def api_get_me(user: dict = Depends(get_current_user)):
@@ -609,7 +456,7 @@ async def api_get_me(user: dict = Depends(get_current_user)):
         {"$group": {"_id": None, "total_orders": {"$sum": 1}, "total_spent": {"$sum": "$amount"}}}
     ]
     res = await orders_col.aggregate(pipeline).to_list(length=1)
-
+    
     total_orders = res[0]["total_orders"] if res else 0
     total_spent = res[0]["total_spent"] if res else 0.0
 
@@ -617,13 +464,13 @@ async def api_get_me(user: dict = Depends(get_current_user)):
         "telegram_id": user["telegram_id"],
         "username": user.get("username", "N/A"),
         "first_name": user.get("first_name", "User"),
-        "balance": float(user.get("balance", 0.0)),
+        "balance": user.get("balance", 0.0),
         "language": user.get("language") or "ru",
         "avatar_url": f"/api/user/avatar/{user['telegram_id']}",
         "is_admin": user["telegram_id"] in ADMIN_IDS or user["telegram_id"] == 999999999,
         "total_orders": total_orders,
         "total_spent": total_spent,
-        "support_url": DEVELOPER_SUPPORT_LINK,
+        "support_url": DEVELOPER_SUPPORT_LINK
     }
 
 @app.post("/api/language")
@@ -635,7 +482,6 @@ async def api_set_language(payload: LanguageRequest, user: dict = Depends(get_cu
 
 @app.get("/api/countries")
 async def api_get_countries(user: dict = Depends(get_current_user)):
-    """Dynamically fetches stock counts and minimum pricing strictly from MongoDB."""
     stock_counts = {}
     pipeline = [
         {"$match": {"status": "available"}},
@@ -658,7 +504,7 @@ async def api_get_countries(user: dict = Depends(get_current_user)):
         cid = c["id"]
         stock = stock_counts.get(cid, 0)
         min_price = min_prices.get(cid)
-
+        
         if min_price is None:
             min_price = c.get("default_price", 0.0)
 
@@ -668,40 +514,39 @@ async def api_get_countries(user: dict = Depends(get_current_user)):
             "name": c.get("name", "Country").split(" (")[0],
             "flag": c.get("flag", "🌐"),
             "stock": stock,
-            "min_price": float(min_price),
+            "min_price": float(min_price)
         })
 
     return countries
 
 @app.get("/api/countries/{country_id}")
 async def api_get_country_details(country_id: int, user: dict = Depends(get_current_user)):
-    """Fetches exact stock breakdown and prices for Spam-Free vs Standard accounts."""
     country = await countries_col.find_one({"id": country_id})
     if not country:
-        raise HTTPException(status_code=404, detail="Country dynamic configuration missing.")
+        raise HTTPException(status_code=404, detail="Country configuration not found in database.")
 
     fresh_count = await products_col.count_documents({
         "country_id": country_id,
         "quality": {"$regex": "Spam-Free", "$options": "i"},
-        "status": "available",
+        "status": "available"
     })
-
+    
     fresh_sample = await products_col.find_one({
         "country_id": country_id,
         "quality": {"$regex": "Spam-Free", "$options": "i"},
-        "status": "available",
+        "status": "available"
     })
 
     broken_count = await products_col.count_documents({
         "country_id": country_id,
         "quality": {"$not": {"$regex": "Spam-Free", "$options": "i"}},
-        "status": "available",
+        "status": "available"
     })
 
     broken_sample = await products_col.find_one({
         "country_id": country_id,
         "quality": {"$not": {"$regex": "Spam-Free", "$options": "i"}},
-        "status": "available",
+        "status": "available"
     })
 
     fresh_price = fresh_sample["price"] if fresh_sample else country.get("fresh_price", 0.0)
@@ -711,15 +556,20 @@ async def api_get_country_details(country_id: int, user: dict = Depends(get_curr
         "id": country["id"],
         "name": country.get("name", "Country").split(" (")[0],
         "flag": country.get("flag", "🌐"),
-        "fresh": {"count": fresh_count, "price": float(fresh_price)},
-        "broken": {"count": broken_count, "price": float(broken_price)},
+        "fresh": {
+            "count": fresh_count,
+            "price": float(fresh_price)
+        },
+        "broken": {
+            "count": broken_count,
+            "price": float(broken_price)
+        }
     }
 
 @app.post("/api/purchase")
 async def api_execute_purchase(req: PurchaseRequest, user: dict = Depends(get_current_user)):
-    """Atomic account purchasing pipeline with balance check and order creation."""
     user_id = user["telegram_id"]
-
+    
     query = {"country_id": req.country_id, "status": "available"}
     if req.grade == "fresh":
         query["quality"] = {"$regex": "Spam-Free", "$options": "i"}
@@ -731,50 +581,37 @@ async def api_execute_purchase(req: PurchaseRequest, user: dict = Depends(get_cu
         raise HTTPException(status_code=400, detail="Stock empty for selected category.")
 
     u_doc = await users_col.find_one({"telegram_id": user_id})
-    current_bal = float(u_doc["balance"]) if u_doc else float(user["balance"])
+    current_bal = u_doc["balance"] if u_doc else user["balance"]
+
     item_price = float(p_doc["price"])
 
     if current_bal < item_price:
         raise HTTPException(
-            status_code=400,
-            detail=f"Insufficient balance. Required: ${item_price:.2f}, Balance: ${current_bal:.2f}",
+            status_code=400, 
+            detail=f"Insufficient funds. Required: ${item_price:.2f}, Balance: ${current_bal:.2f}"
         )
 
-    # Atomic Update to lock product & deduct balance
-    res = await products_col.update_one(
-        {"_id": p_doc["_id"], "status": "available"},
-        {"$set": {"status": "sold", "sold_to": user_id, "sold_at": datetime.datetime.utcnow()}}
-    )
-
-    if res.modified_count == 0:
-        raise HTTPException(status_code=400, detail="Item was purchased by another user concurrently.")
-
-    await users_col.update_one(
-        {"telegram_id": user_id},
-        {"$inc": {"balance": -item_price}}
-    )
-
     new_balance = current_bal - item_price
-    order_id = f"ORD-{random.randint(100000, 999999)}"
+    
+    await users_col.update_one({"telegram_id": user_id}, {"$set": {"balance": new_balance}})
+    await products_col.update_one({"_id": p_doc["_id"]}, {"$set": {"status": "sold"}})
 
+    order_id = f"ORD-{random.randint(100000, 999999)}"
     await orders_col.insert_one({
         "order_id": order_id,
         "user_id": user_id,
         "product_id": p_doc["product_id"],
-        "country_id": req.country_id,
         "amount": item_price,
         "status": "completed",
-        "created_at": datetime.datetime.utcnow(),
+        "created_at": datetime.datetime.utcnow()
     })
-
-    await log_event("order_completed", {"order_id": order_id, "user_id": user_id, "amount": item_price})
 
     return {
         "status": "success",
         "order_id": order_id,
         "product_id": p_doc["product_id"],
         "amount": item_price,
-        "new_balance": new_balance,
+        "new_balance": new_balance
     }
 
 @app.get("/api/orders")
@@ -785,12 +622,13 @@ async def api_get_orders(user: dict = Depends(get_current_user)):
         orders.append({
             "order_id": o["order_id"],
             "product_id": o["product_id"],
-            "quality": "Account Session Data",
+            "quality": "Account Session",
             "flag": "📱",
             "amount": float(o["amount"]),
             "status": o["status"],
-            "created_at": o["created_at"].strftime("%Y-%m-%d %H:%M UTC"),
+            "created_at": o["created_at"].strftime("%Y-%m-%d %H:%M UTC")
         })
+
     return orders
 
 @app.get("/api/payment-methods")
@@ -801,7 +639,7 @@ async def api_get_payment_methods(user: dict = Depends(get_current_user)):
 async def api_create_deposit(req: DepositRequest, user: dict = Depends(get_current_user)):
     if req.amount < 1.00:
         raise HTTPException(status_code=400, detail="Minimum deposit amount is $1.00 USD.")
-
+    
     if req.method_key not in PAYMENT_METHODS:
         raise HTTPException(status_code=400, detail="Invalid payment method key.")
 
@@ -819,7 +657,7 @@ async def api_create_deposit(req: DepositRequest, user: dict = Depends(get_curre
         "ticker": method_info["ticker"],
         "network": method_info["name"],
         "address": method_info["address"],
-        "memo": method_info.get("memo", ""),
+        "memo": method_info.get("memo", "")
     }
 
 @app.post("/api/deposit/proof")
@@ -829,11 +667,10 @@ async def api_upload_deposit_proof(
     crypto_amount: str = Form(...),
     method_key: str = Form(...),
     file: UploadFile = File(...),
-    user: dict = Depends(get_current_user),
+    user: dict = Depends(get_current_user)
 ):
     """
-    Saves deposit proof receipt in MongoDB and immediately forwards the photo and metadata
-    to Admin via Telegram Bot API with Approve/Reject interactive buttons.
+    Saves deposit proof in MongoDB and delivers screenshot with interactive inline buttons to Admins.
     """
     method_name = PAYMENT_METHODS.get(method_key, {}).get("name", method_key)
     file_bytes = await file.read()
@@ -847,14 +684,14 @@ async def api_upload_deposit_proof(
         "method": method_name,
         "crypto_amount": crypto_amount,
         "status": "pending",
-        "proof_filename": file.filename or "receipt.jpg",
-        "created_at": datetime.datetime.utcnow(),
+        "proof_filename": file.filename,
+        "created_at": datetime.datetime.utcnow()
     }
     await topups_col.insert_one(topup_doc)
 
-    # Trigger async dispatch to Admin Telegram Chat with photo & inline approval keys
+    # Forward interactive approval request directly to Admin Telegram
     asyncio.create_task(
-        dispatch_payment_proof_to_admins(
+        send_telegram_admin_approval_request(
             topup_id=invoice_code,
             user_id=user["telegram_id"],
             username=user.get("username", "N/A"),
@@ -863,18 +700,13 @@ async def api_upload_deposit_proof(
             crypto_amount=crypto_amount,
             method_name=method_name,
             photo_bytes=file_bytes,
-            filename=file.filename or "receipt.jpg",
+            filename=file.filename or "receipt.jpg"
         )
     )
 
-    return {
-        "status": "success",
-        "message": "Payment proof submitted. Admin notified via Telegram!",
-    }
+    return {"status": "success", "message": "Payment proof submitted! Admins can now approve balance from Telegram."}
 
-# ==============================================================================
-# ADMIN API ENDPOINTS
-# ==============================================================================
+# --- ADMIN API ENDPOINTS ---
 
 @app.get("/api/admin/stats")
 async def api_admin_stats(admin: dict = Depends(get_admin_user)):
@@ -882,7 +714,7 @@ async def api_admin_stats(admin: dict = Depends(get_admin_user)):
         "total_users": await users_col.count_documents({}),
         "available_stock": await products_col.count_documents({"status": "available"}),
         "total_orders": await orders_col.count_documents({}),
-        "pending_topups": await topups_col.count_documents({"status": "pending"}),
+        "pending_topups": await topups_col.count_documents({"status": "pending"})
     }
 
 @app.post("/api/admin/stock")
@@ -899,7 +731,7 @@ async def api_admin_add_stock(req: AdminAddStockRequest, admin: dict = Depends(g
             "price": req.price,
             "quality": req.quality,
             "status": "available",
-            "created_at": datetime.datetime.utcnow(),
+            "created_at": datetime.datetime.utcnow()
         })
 
     if bulk_products:
@@ -907,9 +739,19 @@ async def api_admin_add_stock(req: AdminAddStockRequest, admin: dict = Depends(g
 
     return {"status": "success", "added": req.quantity}
 
-# ==============================================================================
-# EMBEDDED HIGH-PERFORMANCE FRONTEND WEBAPP
-# ==============================================================================
+@app.post("/api/admin/manual-credit")
+async def api_admin_manual_credit(req: AdminManualCreditRequest, admin: dict = Depends(get_admin_user)):
+    res = await users_col.update_one({"telegram_id": req.target_user_id}, {"$inc": {"balance": req.amount}})
+    if res.matched_count == 0:
+        raise HTTPException(status_code=404, detail="Target user ID not found.")
+    
+    await send_telegram_user_message(
+        req.target_user_id,
+        f"💵 <b>BALANCE CREDITED!</b>\n\nSupport has manually added <b>${req.amount:.2f} USD</b> to your wallet."
+    )
+    return {"status": "success", "credited": req.amount}
+
+# --- FRONTEND WEB APP CODE ---
 
 HTML_CONTENT = """<!DOCTYPE html>
 <html lang="en" class="dark">
@@ -1009,6 +851,7 @@ HTML_CONTENT = """<!DOCTYPE html>
 </head>
 <body class="font-sans antialiased selection:bg-brand-500 selection:text-white">
 
+    <!-- HEADER -->
     <header class="p-4 flex items-center justify-between border-b border-white/10 sticky top-0 bg-[#070a12]/90 backdrop-blur-xl z-40">
         <div class="flex items-center space-x-3">
             <div class="relative">
@@ -1034,6 +877,7 @@ HTML_CONTENT = """<!DOCTYPE html>
 
     <main class="p-4 max-w-lg mx-auto space-y-5">
 
+        <!-- HOME VIEW -->
         <div id="view-home" class="space-y-5">
             <div class="glass-card rounded-3xl p-6 relative overflow-hidden animate-pulse-glow border border-brand-500/30 bg-gradient-to-br from-brand-900/40 via-purple-900/20 to-slate-900">
                 <div class="absolute -right-8 -bottom-8 w-32 h-32 bg-brand-500/20 rounded-full blur-2xl pointer-events-none"></div>
@@ -1092,6 +936,7 @@ HTML_CONTENT = """<!DOCTYPE html>
             </div>
         </div>
 
+        <!-- SHOP VIEW -->
         <div id="view-shop" class="hidden space-y-4">
             <div class="relative">
                 <svg class="w-4 h-4 absolute left-3.5 top-3.5 text-slate-400" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M21 21l-6-6m2-5a7 7 0 11-14 0 7 7 0 0114 0z"></path></svg>
@@ -1104,6 +949,7 @@ HTML_CONTENT = """<!DOCTYPE html>
             </div>
         </div>
 
+        <!-- COUNTRY DETAIL VIEW -->
         <div id="view-country-detail" class="hidden space-y-4">
             <button onclick="switchTab('shop')" class="text-xs font-bold text-brand-400 flex items-center gap-1.5 mb-2 active:scale-95 transition-transform">
                 <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M10 19l-7-7m0 0l7-7m-7 7h18"></path></svg>
@@ -1124,7 +970,7 @@ HTML_CONTENT = """<!DOCTYPE html>
                 <div class="glass-card p-4 rounded-2xl flex items-center justify-between border-emerald-500/30 hover:border-emerald-500/50 transition-colors">
                     <div>
                         <div class="flex items-center gap-2 font-bold text-emerald-400 text-sm">
-                            <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 12l2 2 4-4m6 2a9 9 0 11-18 0 9 9 0 0118 0z"></path></svg>
+                            <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 12l2 2 4-4m6 2a9 9 0 11-18 0 11-18 0018 0z"></path></svg>
                             Spam-Free (Fresh)
                         </div>
                         <div id="fresh-stock-info" class="text-xs text-slate-400 mt-1 font-mono">Available: -- | Price: $0.00</div>
@@ -1145,13 +991,14 @@ HTML_CONTENT = """<!DOCTYPE html>
             </div>
         </div>
 
+        <!-- WALLET VIEW -->
         <div id="view-wallet" class="hidden space-y-4">
             <div class="glass-card p-6 rounded-3xl text-center border-brand-500/30 bg-gradient-to-b from-brand-900/20 to-slate-900">
                 <span class="text-xs text-slate-400 font-bold uppercase tracking-wider">Available Balance</span>
                 <div id="wallet-balance" class="text-4xl font-extrabold text-white mt-1 font-mono tracking-tight">$0.00</div>
             </div>
 
-            <h3 class="font-bold text-xs uppercase tracking-wider text-slate-400">Select Deposit Crypto</h3>
+            <h3 class="font-bold text-xs uppercase tracking-wider text-slate-400">Select Deposit Crypto Network</h3>
             <div id="payment-methods-grid" class="grid grid-cols-2 gap-3"></div>
 
             <div id="deposit-amount-section" class="hidden glass-card p-5 rounded-2xl space-y-4 border-brand-500/40">
@@ -1170,7 +1017,7 @@ HTML_CONTENT = """<!DOCTYPE html>
 
             <div id="invoice-section" class="hidden glass-card p-5 rounded-2xl space-y-4 border-emerald-500/40 bg-slate-900/90">
                 <div class="flex justify-between items-center border-b border-white/10 pb-3">
-                    <span id="invoice-net" class="font-bold text-sm text-brand-400">USDT (TRC20)</span>
+                    <span id="invoice-net" class="font-bold text-sm text-brand-400">USDT (BEP-20)</span>
                     <span id="invoice-code" class="text-xs font-mono text-slate-400">INV-00000</span>
                 </div>
                 <div>
@@ -1180,6 +1027,10 @@ HTML_CONTENT = """<!DOCTYPE html>
                 <div>
                     <span class="text-xs text-slate-400 block mb-1">Deposit Address:</span>
                     <div id="invoice-address" class="text-xs font-mono bg-black/60 p-3 rounded-xl break-all text-slate-200 select-all border border-white/5">0x000...</div>
+                </div>
+                <div id="invoice-memo-container" class="hidden">
+                    <span class="text-xs text-amber-400 block mb-1">Required MEMO / Tag:</span>
+                    <div id="invoice-memo" class="text-xs font-mono bg-amber-500/10 p-2.5 rounded-xl text-amber-300 font-bold">--</div>
                 </div>
                 <div class="pt-2">
                     <input type="file" id="proof-file" accept="image/*" class="hidden" onchange="uploadProof(this)">
@@ -1191,11 +1042,13 @@ HTML_CONTENT = """<!DOCTYPE html>
             </div>
         </div>
 
+        <!-- ORDERS VIEW -->
         <div id="view-orders" class="hidden space-y-3">
             <h2 class="font-bold text-xs uppercase tracking-wider text-slate-400">Purchase History</h2>
             <div id="orders-list" class="space-y-3"></div>
         </div>
 
+        <!-- PROFILE VIEW -->
         <div id="view-profile" class="hidden space-y-4">
             <div class="glass-card p-6 rounded-3xl space-y-4 border-brand-500/20 bg-gradient-to-b from-slate-900 to-slate-950">
                 <div class="flex items-center space-x-4 border-b border-white/10 pb-4">
@@ -1223,6 +1076,7 @@ HTML_CONTENT = """<!DOCTYPE html>
             </a>
         </div>
 
+        <!-- ADMIN DASHBOARD VIEW -->
         <div id="view-admin" class="hidden space-y-4">
             <h2 class="font-bold text-xs uppercase tracking-wider text-red-400 flex items-center gap-2">
                 <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 12l2 2 4-4m5.618-4.016A11.955 11.955 0 0112 2.944a11.955 11.955 0 01-8.618 3.04A12.02 12.02 0 003 9c0 5.591 3.824 10.29 9 11.622 5.176-1.332 9-6.03 9-11.622 0-1.042-.133-2.052-.382-3.016z"></path></svg>
@@ -1242,10 +1096,18 @@ HTML_CONTENT = """<!DOCTYPE html>
                 </div>
                 <button onclick="submitAdminStock()" class="w-full py-3 bg-emerald-600 hover:bg-emerald-500 font-bold text-xs text-white rounded-xl active:scale-95 transition-all shadow-lg">Add Accounts</button>
             </div>
+
+            <div class="glass-card p-5 rounded-2xl space-y-3">
+                <h3 class="font-bold text-xs text-white uppercase tracking-wider">💵 Manual User Credit</h3>
+                <input type="number" id="admin-target-user" placeholder="User Telegram ID" class="w-full p-3 glass-card rounded-xl text-xs text-white border-white/10 font-mono">
+                <input type="number" id="admin-credit-amount" step="0.5" placeholder="Amount ($)" class="w-full p-3 glass-card rounded-xl text-xs text-white border-white/10 font-mono">
+                <button onclick="submitManualCredit()" class="w-full py-3 bg-blue-600 hover:bg-blue-500 font-bold text-xs text-white rounded-xl active:scale-95 transition-all shadow-lg">Credit User Balance</button>
+            </div>
         </div>
 
     </main>
 
+    <!-- CONFIRMATION MODAL -->
     <div id="purchase-modal" class="fixed inset-0 bg-black/80 backdrop-blur-md z-50 hidden flex items-center justify-center p-4">
         <div class="glass-card w-full max-w-xs p-6 rounded-3xl border-brand-500/40 space-y-4 bg-slate-950">
             <h3 class="font-bold text-base text-white">Confirm Order</h3>
@@ -1261,6 +1123,7 @@ HTML_CONTENT = """<!DOCTYPE html>
         </div>
     </div>
 
+    <!-- BOTTOM NAVIGATION -->
     <nav class="fixed bottom-0 left-0 right-0 glass-card border-t border-white/10 p-2.5 flex justify-around items-center z-40 max-w-lg mx-auto bg-[#070a12]/95 backdrop-blur-2xl">
         <button onclick="switchTab('home')" id="nav-home" class="flex flex-col items-center gap-1 text-slate-400 text-[10px] font-bold nav-active transition-all">
             <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M3 12l2-2m0 0l7-7 7 7M5 10v10a1 1 0 001 1h3m10-11l2 2m-2-2v10a1 1 0 01-1 1h-3m-6 0a1 1 0 001-1v-4a1 1 0 011-1h2a1 1 0 011 1v4a1 1 0 001 1m-6 0h6"></path></svg>
@@ -1495,6 +1358,14 @@ HTML_CONTENT = """<!DOCTYPE html>
                 document.getElementById('invoice-code').innerText = inv.invoice_code;
                 document.getElementById('invoice-crypto').innerText = `${inv.crypto_amount} ${inv.ticker}`;
                 document.getElementById('invoice-address').innerText = inv.address;
+
+                if (inv.memo) {
+                    document.getElementById('invoice-memo').innerText = inv.memo;
+                    document.getElementById('invoice-memo-container').classList.remove('hidden');
+                } else {
+                    document.getElementById('invoice-memo-container').classList.add('hidden');
+                }
+
                 document.getElementById('invoice-section').classList.remove('hidden');
             } catch (e) { alert(e.message); }
         }
@@ -1515,7 +1386,7 @@ HTML_CONTENT = """<!DOCTYPE html>
 
             try {
                 await fetchAPI('/deposit/proof', { method: 'POST', body: formData });
-                alert('✅ Receipt sent to Telegram Admins! Your balance will update as soon as they approve.');
+                alert('✅ Receipt submitted! Admins will verify your payment in Telegram.');
                 document.getElementById('invoice-section').classList.add('hidden');
             } catch (e) { alert(e.message); }
         }
@@ -1568,6 +1439,20 @@ HTML_CONTENT = """<!DOCTYPE html>
             } catch (e) { alert(e.message); }
         }
 
+        async function submitManualCredit() {
+            const uid = parseInt(document.getElementById('admin-target-user').value);
+            const amt = parseFloat(document.getElementById('admin-credit-amount').value);
+
+            try {
+                await fetchAPI('/admin/manual-credit', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ target_user_id: uid, amount: amt })
+                });
+                alert(`✅ Successfully credited $${amt.toFixed(2)} to User ID ${uid}!`);
+            } catch (e) { alert(e.message); }
+        }
+
         async function switchLanguage() {
             const nextLang = currentUser.language === 'ru' ? 'en' : 'ru';
             try {
@@ -1591,37 +1476,9 @@ HTML_CONTENT = """<!DOCTYPE html>
 async def serve_webapp():
     return HTMLResponse(content=HTML_CONTENT)
 
-# ==============================================================================
-# CONCURRENT DUAL ENGINE RUNNER
-# ==============================================================================
-
-async def run_fastapi_server(port: int):
-    """Starts Uvicorn server for FastAPI backend."""
-    import uvicorn
-    config = uvicorn.Config(app=app, host="0.0.0.0", port=port, log_level="info")
-    server = uvicorn.Server(config)
-    await server.serve()
-
-async def run_telegram_bot():
-    """Starts Aiogram Bot Long-Polling."""
-    if BOT_TOKEN.startswith("123456789"):
-        logger.warning("Mock token detected. Skipping bot polling loop.")
-        return
-    logger.info("Starting Aiogram Telegram Bot polling...")
-    await dp.start_polling(bot)
-
-async def main():
-    port = int(os.environ.get("PORT", 8080))
-    logger.info("Initializing Master Digital Store Ultra Services...")
-
-    # Run FastAPI and Telegram Bot concurrently in the same asyncio event loop
-    await asyncio.gather(
-        run_fastapi_server(port),
-        run_telegram_bot(),
-    )
+# --- APPLICATION ENTRYPOINT ---
 
 if __name__ == "__main__":
-    try:
-        asyncio.run(main())
-    except (KeyboardInterrupt, SystemExit):
-        logger.info("Digital Store Ultra stopped gracefully.")
+    import uvicorn
+    port = int(os.environ.get("PORT", 8080))
+    uvicorn.run("mini_app:app", host="0.0.0.0", port=port, reload=False)
