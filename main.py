@@ -3,7 +3,7 @@ import datetime
 import html
 import logging
 import random
-from typing import Optional, List
+from typing import Optional, List, Union
 
 import aiohttp
 from motor.motor_asyncio import AsyncIOMotorClient
@@ -56,7 +56,6 @@ async def init_db():
     await orders_col.create_index("order_id", unique=True)
     await topups_col.create_index("topup_id", unique=True)
 
-    # Sync countries list to MongoDB
     idx = 1
     for code, name, flag in sorted(ALL_COUNTRIES_DATA, key=lambda x: x[1]):
         await countries_col.update_one(
@@ -148,7 +147,7 @@ async def get_or_create_user(telegram_id: int, username: Optional[str], first_na
 async def cmd_start(message: Message):
     user = await get_or_create_user(message.from_user.id, message.from_user.username, message.from_user.first_name)
     if user.get('is_blocked'):
-        await message.answer("❌ <i>Ваш аккаунт заблокирован.</i>", parse_mode="HTML")
+        await message.answer("❌ <i>Ваш аккаунт заблокирован. / Your account is blocked.</i>", parse_mode="HTML")
         return
 
     if user.get('language') is None:
@@ -194,7 +193,7 @@ async def cb_switch_language_menu(callback: CallbackQuery):
         ],
         [InlineKeyboardButton(text="⬅️ Back / Назад", callback_data="main_menu")]
     ])
-    await callback.message.edit_text("🌐 Select Language / Выберите Язык:", reply_markup=kb)
+    await callback.message.edit_text("🌐 <b>Select Language / Выберите Язык:</b>", reply_markup=kb, parse_mode="HTML")
 
 @router.callback_query(F.data.startswith("set_lang:"))
 async def cb_set_language(callback: CallbackQuery):
@@ -251,7 +250,7 @@ async def cb_select_category(callback: CallbackQuery):
         c1 = countries[i]
         st1 = await products_col.count_documents({"country_id": c1['id'], "status": "available"})
         row_btns.append(InlineKeyboardButton(
-            text=f"{c1['flag']} {c1['name'].split(' (')[0]} [{st1}]",
+            text=f"{c1['flag']} {c1['name'].split(' (')[0]} ({st1})",
             callback_data=f"buy_country:{p_type}:{c1['id']}:{page}"
         ))
 
@@ -259,7 +258,7 @@ async def cb_select_category(callback: CallbackQuery):
             c2 = countries[i + 1]
             st2 = await products_col.count_documents({"country_id": c2['id'], "status": "available"})
             row_btns.append(InlineKeyboardButton(
-                text=f"{c2['flag']} {c2['name'].split(' (')[0]} [{st2}]",
+                text=f"{c2['flag']} {c2['name'].split(' (')[0]} ({st2})",
                 callback_data=f"buy_country:{p_type}:{c2['id']}:{page}"
             ))
         buttons.append(row_btns)
@@ -305,8 +304,8 @@ async def cb_select_quality_grade(callback: CallbackQuery):
     })
 
     buttons = [
-        [InlineKeyboardButton(text=f"{fresh_label} [{fresh_count} available]", callback_data=f"list_prods:{p_type}:{country_id}:fresh:1:{back_page}", style="success")],
-        [InlineKeyboardButton(text=f"{broken_label} [{broken_count} available]", callback_data=f"list_prods:{p_type}:{country_id}:broken:1:{back_page}", style="danger")],
+        [InlineKeyboardButton(text=f"{fresh_label} • [{fresh_count}]", callback_data=f"list_prods:{p_type}:{country_id}:fresh:1:{back_page}", style="success")],
+        [InlineKeyboardButton(text=f"{broken_label} • [{broken_count}]", callback_data=f"list_prods:{p_type}:{country_id}:broken:1:{back_page}", style="danger")],
         [InlineKeyboardButton(text=t["btn_back"], callback_data=f"buy_cat:{p_type}:{back_page}")]
     ]
     
@@ -347,16 +346,16 @@ async def cb_list_products(callback: CallbackQuery):
     unit_price = sample_product['price'] if sample_product else 0.0
 
     text = (
-        f"📱 <b>{country['flag']} {country['name'].upper()} — {tier_title.upper()}</b>\n"
+        f"📱 <b>{country['flag']} {country['name'].upper()}</b> — <code>{tier_title.upper()}</code>\n"
         f"═══════════════════════\n\n"
-        f"📦 <b>Available Quantity:</b> <code>{total_items} accounts</code>\n"
-        f"💵 <b>Price per Number/Account:</b> <code>${unit_price:.2f} USD</code>\n\n"
-        f"<i>⚡ Buying will automatically issue phone numbers/accounts from this available pool.</i>"
+        f"📦 <b>In Stock:</b> <code>{total_items} accounts</code>\n"
+        f"💵 <b>Price per item:</b> <code>${unit_price:.2f} USD</code>\n\n"
+        f"<blockquote>⚡ Instant delivery to this chat upon purchase confirmation.</blockquote>"
     )
 
     buttons = [
         [InlineKeyboardButton(
-            text=f"🛒 Buy 1 Number (${unit_price:.2f})",
+            text=f"🛒 Buy 1 Account (${unit_price:.2f})",
             callback_data=f"exec_buy:{country_id}:{grade}",
             style="success"
         )],
@@ -427,18 +426,22 @@ async def cb_wallet_topup_start(callback: CallbackQuery, state: FSMContext):
     
     await state.set_state(RechargeFSM.select_method)
     
-    buttons = [
-        [
-            InlineKeyboardButton(text="USDT (BEP-20)", callback_data="dep_method:usdt_bep20", style="primary"),
-            InlineKeyboardButton(text="USDT (ERC-20)", callback_data="dep_method:usdt_erc20", style="primary")
-        ],
-        [
-            InlineKeyboardButton(text="USDT (Polygon)", callback_data="dep_method:usdt_poly", style="primary"),
-            InlineKeyboardButton(text="USDT (TON)", callback_data="dep_method:usdt_ton", style="primary")
-        ],
-        [InlineKeyboardButton(text=t["btn_support"], url=DEVELOPER_SUPPORT_LINK)],
-        [InlineKeyboardButton(text=t["btn_home"], callback_data="main_menu")]
-    ]
+    # Dynamic grid layout supporting all PAYMENT_METHODS configured in config.py
+    buttons = []
+    keys = list(PAYMENT_METHODS.keys())
+    for i in range(0, len(keys), 2):
+        row = []
+        k1 = keys[i]
+        m1 = PAYMENT_METHODS[k1]
+        row.append(InlineKeyboardButton(text=m1['name'], callback_data=f"dep_method:{k1}", style="primary"))
+        if i + 1 < len(keys):
+            k2 = keys[i + 1]
+            m2 = PAYMENT_METHODS[k2]
+            row.append(InlineKeyboardButton(text=m2['name'], callback_data=f"dep_method:{k2}", style="primary"))
+        buttons.append(row)
+
+    buttons.append([InlineKeyboardButton(text=t["btn_support"], url=DEVELOPER_SUPPORT_LINK)])
+    buttons.append([InlineKeyboardButton(text=t["btn_home"], callback_data="main_menu")])
     
     text = t["dep_title"].format(balance=user['balance'])
     await callback.message.edit_text(text, reply_markup=InlineKeyboardMarkup(inline_keyboard=buttons), parse_mode="HTML")
@@ -460,14 +463,14 @@ async def cb_topup_select_amount(callback: CallbackQuery, state: FSMContext):
 
     buttons = [
         [
-            InlineKeyboardButton(text="$4.50", callback_data="dep_amt:4.5"),
-            InlineKeyboardButton(text="$10.00", callback_data="dep_amt:10.0")
+            InlineKeyboardButton(text="💲 $4.50", callback_data="dep_amt:4.5"),
+            InlineKeyboardButton(text="💲 $10.00", callback_data="dep_amt:10.0")
         ],
         [
-            InlineKeyboardButton(text="$15.00", callback_data="dep_amt:15.0"),
-            InlineKeyboardButton(text="$25.00", callback_data="dep_amt:25.0")
+            InlineKeyboardButton(text="💲 $15.00", callback_data="dep_amt:15.0"),
+            InlineKeyboardButton(text="💲 $25.00", callback_data="dep_amt:25.0")
         ],
-        [InlineKeyboardButton(text="✏️ Custom Amount / Своя сумма USD", callback_data="dep_amt:custom", style="primary")],
+        [InlineKeyboardButton(text="✏️ Custom Amount / Своя сумма", callback_data="dep_amt:custom", style="primary")],
         [InlineKeyboardButton(text=t["btn_back"], callback_data="wallet_topup")]
     ]
 
@@ -481,7 +484,8 @@ async def cb_topup_preset_amount(callback: CallbackQuery, state: FSMContext):
     if amt_str == "custom":
         await state.set_state(RechargeFSM.custom_amount)
         await callback.message.edit_text(
-            "✍️ <b>Enter amount in USD ($) / Введите сумму в USD ($):</b>\n\n<blockquote>Minimum deposit / Минимальный депозит: $4.50 USD.</blockquote>",
+            "✍️ <b>Enter deposit amount in USD ($):</b>\n\n"
+            "<blockquote>⚠️ Minimum deposit amount: $4.50 USD.</blockquote>",
             parse_mode="HTML"
         )
         return
@@ -497,12 +501,12 @@ async def process_custom_topup_amount(message: Message, state: FSMContext):
             await message.answer("⚠️ <b>Minimum deposit is $4.50 USD / Минимальное пополнение: $4.50 USD.</b>", parse_mode="HTML")
             return
     except ValueError:
-        await message.answer("❌ Invalid amount format. Please enter a valid number:")
+        await message.answer("❌ Invalid amount format. Please enter a valid number (e.g., 10 or 15.5):")
         return
 
     await generate_invoice(message, state, amount)
 
-async def generate_invoice(event: CallbackQuery | Message, state: FSMContext, amount: float):
+async def generate_invoice(event: Union[CallbackQuery, Message], state: FSMContext, amount: float):
     data = await state.get_data()
     method_key = data.get("method_key", "usdt_bep20")
     method_info = PAYMENT_METHODS[method_key]
@@ -523,21 +527,21 @@ async def generate_invoice(event: CallbackQuery | Message, state: FSMContext, am
     memo_str = f"\n📌 <b>MEMO / Tag:</b> <code>{method_info['memo']}</code>" if method_info.get('memo') else ""
 
     text = (
-        f"📥 <b>{method_info['name']} DEPOSIT / ПОПОЛНЕНИЕ</b>\n"
+        f"📥 <b>{method_info['name'].upper()} DEPOSIT</b>\n"
         f"═══════════════════════\n\n"
-        f"💳 <b>Amount due / К оплате:</b> <code>{coin_amount} {method_info['ticker']}</code> (${amount:.2f})\n"
-        f"🧾 <b>Invoice / Инвойс:</b> <code>{invoice_code}</code>\n\n"
-        f"💲 <b>Wallet Address / Адрес кошелька:</b>\n"
+        f"💳 <b>Amount due:</b> <code>{coin_amount} {method_info['ticker']}</code> (${amount:.2f} USD)\n"
+        f"🧾 <b>Invoice ID:</b> <code>{invoice_code}</code>\n\n"
+        f"💲 <b>Wallet Address:</b>\n"
         f"<code>{method_info['address']}</code>{memo_str}\n\n"
-        f"<blockquote>⚠️ Send EXACTLY <b>{coin_amount} {method_info['ticker']}</b>.</blockquote>"
+        f"<blockquote>⚠️ Send EXACTLY <b>{coin_amount} {method_info['ticker']}</b> to ensure immediate detection.</blockquote>"
     )
 
     buttons = [
-        [InlineKeyboardButton(text="📋 Copy Address / Скопировать адрес", callback_data=f"copy_addr:{method_key}")],
-        [InlineKeyboardButton(text=f"📋 Copy Amount / Скопировать · {coin_amount}", callback_data=f"copy_amt:{coin_amount}")],
+        [InlineKeyboardButton(text="📋 Copy Address", callback_data=f"copy_addr:{method_key}")],
+        [InlineKeyboardButton(text=f"📋 Copy Amount ({coin_amount})", callback_data=f"copy_amt:{coin_amount}")],
         [InlineKeyboardButton(text="✅ I Have Paid / Я оплатил", callback_data=f"topup_paid:{invoice_code}", style="success")],
         [InlineKeyboardButton(text="💬 Support", url=DEVELOPER_SUPPORT_LINK)],
-        [InlineKeyboardButton(text="Back / Назад", callback_data="wallet_topup")]
+        [InlineKeyboardButton(text="⬅️ Back / Назад", callback_data="wallet_topup")]
     ]
     
     if isinstance(event, CallbackQuery):
@@ -549,12 +553,12 @@ async def generate_invoice(event: CallbackQuery | Message, state: FSMContext, am
 async def cb_copy_address(callback: CallbackQuery):
     method_key = callback.data.split(":")[1]
     addr = PAYMENT_METHODS[method_key]['address']
-    await callback.answer(f"Address Copied: {addr}", show_alert=True)
+    await callback.answer(f"Copied Address: {addr}", show_alert=True)
 
 @router.callback_query(F.data.startswith("copy_amt:"))
 async def cb_copy_amount(callback: CallbackQuery):
     amt = callback.data.split(":")[1]
-    await callback.answer(f"Amount Copied: {amt}", show_alert=True)
+    await callback.answer(f"Copied Amount: {amt}", show_alert=True)
 
 @router.callback_query(F.data.startswith("topup_paid:"))
 async def cb_topup_i_have_paid(callback: CallbackQuery, state: FSMContext):
@@ -625,7 +629,7 @@ async def cb_admin_approve_topup(callback: CallbackQuery):
         await topups_col.update_one({"topup_id": topup_id}, {"$set": {"status": "approved"}})
         await users_col.update_one({"telegram_id": topup['user_id']}, {"$inc": {"balance": topup['amount']}})
         try:
-            await callback.bot.send_message(topup['user_id'], f"🎉 <b>Deposit Approved! / Депозит одобрен!</b>\n\n<code>${topup['amount']:.2f} USD</code> credited to your wallet.", parse_mode="HTML")
+            await callback.bot.send_message(topup['user_id'], f"🎉 <b>Deposit Approved! / Депозит одобрен!</b>\n\n<code>${topup['amount']:.2f} USD</code> has been credited to your account.", parse_mode="HTML")
         except Exception:
             pass
 
@@ -640,7 +644,7 @@ async def cb_admin_reject_topup(callback: CallbackQuery):
     if topup:
         await topups_col.update_one({"topup_id": topup_id}, {"$set": {"status": "rejected"}})
         try:
-            await callback.bot.send_message(topup['user_id'], f"❌ Top-up request for <b>${topup['amount']:.2f} USD</b> rejected.", parse_mode="HTML")
+            await callback.bot.send_message(topup['user_id'], f"❌ Deposit request for <b>${topup['amount']:.2f} USD</b> was declined.", parse_mode="HTML")
         except Exception:
             pass
 
@@ -656,10 +660,10 @@ async def cb_admin_panel(callback: CallbackQuery):
         [InlineKeyboardButton(text="➕ Add Stock by Quantity", callback_data="admin_add_prod", style="success")],
         [InlineKeyboardButton(text="📤 Export Full Stock (.txt)", callback_data="admin_export_txt")],
         [InlineKeyboardButton(text="📊 Check Storage Usage", callback_data="admin_check_storage", style="primary")],
-        [InlineKeyboardButton(text="⚠️ Delete All Database", callback_data="admin_clear_db_confirm", style="danger")],
+        [InlineKeyboardButton(text="⚠️ Reset Database", callback_data="admin_clear_db_confirm", style="danger")],
         [InlineKeyboardButton(text="🏠 Main Menu", callback_data="main_menu")]
     ])
-    await callback.message.edit_text("👨‍💻 <b>ADMIN CONTROL PANEL</b>\n\nSelect operation mode:", reply_markup=kb, parse_mode="HTML")
+    await callback.message.edit_text("👨‍💻 <b>ADMIN CONTROL PANEL</b>\n\nSelect action to execute:", reply_markup=kb, parse_mode="HTML")
 
 @router.callback_query(F.data == "admin_check_storage")
 async def cb_admin_check_storage(callback: CallbackQuery):
@@ -675,7 +679,7 @@ async def cb_admin_check_storage(callback: CallbackQuery):
         available_mb = max(0.0, max_storage_mb - storage_size_mb)
 
         text = (
-            f"📊 <b>MONGODB STORAGE STATISTICS</b>\n"
+            f"📊 <b>MONGODB STORAGE METRICS</b>\n"
             f"═══════════════════════\n\n"
             f"💾 <b>Data Size:</b> <code>{data_size_mb:.2f} MB</code>\n"
             f"📦 <b>Storage Used:</b> <code>{storage_size_mb:.2f} MB</code>\n"
@@ -696,13 +700,13 @@ async def cb_admin_clear_db_confirm(callback: CallbackQuery):
     if callback.from_user.id not in ADMIN_IDS: return
 
     kb = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="⚠️ YES, DELETE ENTIRE DB ⚠️", callback_data="admin_clear_db_execute", style="danger")],
+        [InlineKeyboardButton(text="⚠️ CONFIRM COMPLETE RESET", callback_data="admin_clear_db_execute", style="danger")],
         [InlineKeyboardButton(text="❌ CANCEL", callback_data="admin_panel", style="primary")]
     ])
     await callback.message.edit_text(
         "🚨 <b>WARNING: DELETE ALL DATABASE DATA</b> 🚨\n\n"
         "Are you sure you want to completely clear the entire MongoDB database?\n"
-        "<i>This action will delete all user accounts, orders, deposits, and stock.</i>",
+        "<i>This action will purge users, orders, deposits, and active stock.</i>",
         reply_markup=kb,
         parse_mode="HTML"
     )
@@ -722,7 +726,7 @@ async def cb_admin_clear_db_execute(callback: CallbackQuery):
     kb = InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="🏠 Main Menu", callback_data="main_menu", style="primary")]
     ])
-    await callback.message.edit_text("💥 <b>DATABASE CLEARED SUCCESSFULLY!</b>\n\nAll MongoDB collections have been reset.", reply_markup=kb, parse_mode="HTML")
+    await callback.message.edit_text("💥 <b>DATABASE RESET COMPLETE!</b>\n\nAll collections have been re-initialized.", reply_markup=kb, parse_mode="HTML")
 
 @router.callback_query(F.data == "admin_export_txt")
 async def cb_admin_export_txt(callback: CallbackQuery):
@@ -743,10 +747,14 @@ async def cb_admin_export_txt(callback: CallbackQuery):
     products = await products_col.aggregate(pipeline).to_list(length=None)
 
     if not products:
-        await callback.answer("❌ No stock/products available to export.", show_alert=True)
+        await callback.answer("❌ No stock available to export.", show_alert=True)
         return
 
-    output_lines = ["==========================================", "       FULL STOCK DATABASE EXPORT         ", "==========================================\n"]
+    output_lines = [
+        "==========================================",
+        "       FULL STOCK DATABASE EXPORT         ",
+        "==========================================\n"
+    ]
     current_country = ""
 
     for p in products:
@@ -807,7 +815,7 @@ async def render_admin_country_selection(callback: CallbackQuery, state: FSMCont
 
     buttons.append(nav_buttons)
     await state.set_state(AddProductFSM.select_country)
-    await callback.message.edit_text(f"Select Target Country for Stock (Page {page}/{total_pages}):", reply_markup=InlineKeyboardMarkup(inline_keyboard=buttons))
+    await callback.message.edit_text(f"<b>Select Target Country for Stock</b> (Page {page}/{total_pages}):", reply_markup=InlineKeyboardMarkup(inline_keyboard=buttons), parse_mode="HTML")
 
 @router.callback_query(F.data.startswith("prod_c:"), StateFilter(AddProductFSM.select_country))
 async def cb_item_country(callback: CallbackQuery, state: FSMContext):
@@ -820,14 +828,14 @@ async def cb_item_country(callback: CallbackQuery, state: FSMContext):
     ]
 
     await state.set_state(AddProductFSM.select_quality)
-    await callback.message.edit_text("Select Account Quality Tier:", reply_markup=InlineKeyboardMarkup(inline_keyboard=qual_buttons))
+    await callback.message.edit_text("<b>Select Account Quality Tier:</b>", reply_markup=InlineKeyboardMarkup(inline_keyboard=qual_buttons), parse_mode="HTML")
 
 @router.callback_query(F.data.startswith("qual:"), StateFilter(AddProductFSM.select_quality))
 async def cb_item_qual(callback: CallbackQuery, state: FSMContext):
     qual = callback.data.split(":")[1]
     await state.update_data(quality=qual)
     await state.set_state(AddProductFSM.enter_price)
-    await callback.message.edit_text("💵 Enter unit price per number/account in USD ($):\n\n<i>Example: 0.50 or 1.20</i>", parse_mode="HTML")
+    await callback.message.edit_text("💵 <b>Enter unit price per account in USD ($):</b>\n\n<i>Example: 0.50 or 1.20</i>", parse_mode="HTML")
 
 @router.message(StateFilter(AddProductFSM.enter_price))
 async def process_item_price(message: Message, state: FSMContext):
@@ -835,12 +843,12 @@ async def process_item_price(message: Message, state: FSMContext):
         price = float(message.text)
         if price <= 0: raise ValueError()
     except ValueError:
-        await message.answer("❌ Invalid price format. Please enter a valid number:")
+        await message.answer("❌ Invalid price format. Please enter a valid number (e.g., 0.50):")
         return
 
     await state.update_data(price=price)
     await state.set_state(AddProductFSM.enter_quantity)
-    await message.answer("🔢 <b>How many accounts/numbers do you want to add?</b>\n\n<i>Example: Type 100 to add 100 available stock slots.</i>", parse_mode="HTML")
+    await message.answer("🔢 <b>How many accounts do you want to add?</b>\n\n<i>Example: Enter 100 to add 100 stock units.</i>", parse_mode="HTML")
 
 @router.message(StateFilter(AddProductFSM.enter_quantity))
 async def process_item_quantity(message: Message, state: FSMContext):
@@ -848,7 +856,7 @@ async def process_item_quantity(message: Message, state: FSMContext):
         quantity = int(message.text)
         if quantity <= 0: raise ValueError()
     except ValueError:
-        await message.answer("❌ Invalid quantity. Please enter a positive integer number (e.g. 50, 100):")
+        await message.answer("❌ Invalid quantity. Please enter a positive integer (e.g., 50, 100):")
         return
 
     data = await state.get_data()
@@ -882,12 +890,12 @@ async def process_item_quantity(message: Message, state: FSMContext):
     await state.clear()
 
     await message.answer(
-        f"✅ <b>STOCK ADDED SUCCESSFULLY!</b>\n═══════════════════════\n\n"
+        f"✅ <b>STOCK ADDED SUCCESSFULLY!</b>\n"
+        f"═══════════════════════\n\n"
         f"🌍 <b>Country:</b> {c_doc['flag']} {c_doc['name']}\n"
         f"🏷️ <b>Tier:</b> <code>{quality}</code>\n"
         f"💵 <b>Price per item:</b> <code>${price:.2f} USD</code>\n"
-        f"📦 <b>Added Quantity:</b> <code>{quantity} accounts</code>\n\n"
-        f"<i>Available quantity is now updated to {quantity} accounts for users!</i>",
+        f"📦 <b>Added Quantity:</b> <code>{quantity} units</code>",
         reply_markup=InlineKeyboardMarkup(inline_keyboard=back_home_buttons("ru")),
         parse_mode="HTML"
     )
