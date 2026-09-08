@@ -62,7 +62,7 @@ orders_col = db["orders"]
 topups_col = db["topups"]
 
 # Initialize FastAPI App
-app = FastAPI(title="Digital Store Ultra Mini App", version="2.0.0")
+app = FastAPI(title="Digital Store Ultra Mini App", version="2.5.0")
 
 app.add_middleware(
     CORSMiddleware,
@@ -72,16 +72,43 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+# --- HELPER: TELEGRAM BOT NOTIFIER ---
+
+async def send_telegram_admin_notification(caption_text: str, photo_bytes: Optional[bytes] = None, filename: str = "receipt.jpg"):
+    """
+    Sends payment proof and invoice details directly to Admin Telegram Chat(s).
+    """
+    if BOT_TOKEN.startswith("123456789"):
+        logger.warning("Using mock BOT_TOKEN. Skipping real Telegram message dispatch.")
+        return
+
+    async with aiohttp.ClientSession() as session:
+        for admin_id in ADMIN_IDS:
+            try:
+                if photo_bytes:
+                    url = f"https://api.telegram.org/bot{BOT_TOKEN}/sendPhoto"
+                    data = aiohttp.FormData()
+                    data.add_field("chat_id", str(admin_id))
+                    data.add_field("caption", caption_text, parse_mode="HTML")
+                    data.add_field("photo", photo_bytes, filename=filename, content_type="image/jpeg")
+                    async with session.post(url, data=data) as resp:
+                        res = await resp.json()
+                        if not res.get("ok"):
+                            logger.error(f"Failed to send photo to admin {admin_id}: {res}")
+                else:
+                    url = f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage"
+                    payload = {"chat_id": admin_id, "text": caption_text, "parse_mode": "HTML"}
+                    async with session.post(url, json=payload) as resp:
+                        res = await resp.json()
+                        if not res.get("ok"):
+                            logger.error(f"Failed to send text to admin {admin_id}: {res}")
+            except Exception as e:
+                logger.error(f"Exception sending admin notification to {admin_id}: {e}")
+
 # --- AUTHENTICATION & SECURITY ---
 
 def verify_telegram_init_data(init_data: str) -> dict:
-    """
-    Validates Telegram WebApp initData using HMAC-SHA256.
-    Returns parsed user dict if valid; raises HTTP 401 otherwise.
-    In local test environments without valid token signature, allows mock user fallback.
-    """
     if not init_data:
-        # Development / Test fallback user
         return {
             "id": 999999999,
             "first_name": "Demo User",
@@ -93,7 +120,6 @@ def verify_telegram_init_data(init_data: str) -> dict:
     try:
         parsed_data = dict(urllib.parse.parse_qsl(init_data, keep_blank_values=True))
         if "hash" not in parsed_data:
-            # Fallback for mock preview
             return {
                 "id": 999999999,
                 "first_name": "Preview User",
@@ -109,7 +135,6 @@ def verify_telegram_init_data(init_data: str) -> dict:
         calculated_hash = hmac.new(secret_key, data_check_string.encode("utf-8"), hashlib.sha256).hexdigest()
 
         if calculated_hash.lower() != hash_check.lower():
-            # Check if using dummy bot token
             if BOT_TOKEN.startswith("123456789"):
                 return json.loads(parsed_data.get("user", "{}"))
             raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid HMAC security signature.")
@@ -123,7 +148,6 @@ def verify_telegram_init_data(init_data: str) -> dict:
         raise
     except Exception as e:
         logger.error(f"Auth verification failure: {e}")
-        # Allow graceful degradation for testing
         return {
             "id": 888888888,
             "first_name": "Telegram User",
@@ -144,14 +168,13 @@ async def get_current_user(x_telegram_init_data: Optional[str] = Header(None)) -
             "username": username,
             "first_name": first_name,
             "language": tg_user.get("language_code", "ru") if tg_user.get("language_code") in ["ru", "en"] else "ru",
-            "balance": 15.00,  # Starting demo bonus balance
+            "balance": 0.00,
             "photo_url": "",
             "is_blocked": 0,
             "created_at": datetime.datetime.utcnow()
         }
         await users_col.insert_one(user)
     else:
-        # Update dynamic fields
         await users_col.update_one(
             {"telegram_id": telegram_id},
             {"$set": {"first_name": first_name, "username": username}}
@@ -185,9 +208,7 @@ async def get_crypto_price_usd(coin_id: str) -> float:
 
 @app.get("/api/user/avatar/{user_id}")
 async def get_user_avatar_proxy(user_id: int):
-    """Fetches real Telegram profile picture using Bot API and streams it."""
     if BOT_TOKEN.startswith("123456789"):
-        # Dummy avatar SVG
         svg = f'''<svg xmlns="http://www.w3.org/2000/svg" width="100" height="100" viewBox="0 0 100 100">
             <defs>
                 <linearGradient id="g" x1="0%" y1="0%" x2="100%" y2="100%">
@@ -202,17 +223,14 @@ async def get_user_avatar_proxy(user_id: int):
 
     try:
         async with aiohttp.ClientSession() as session:
-            # 1. Get profile photos list
             photos_url = f"https://api.telegram.org/bot{BOT_TOKEN}/getUserProfilePhotos?user_id={user_id}&limit=1"
             async with session.get(photos_url) as resp:
                 data = await resp.json()
                 if not data.get("ok") or not data.get("result", {}).get("photos"):
                     raise Exception("No profile photo found")
                 
-                # Extract file_id of smallest/medium photo
                 file_id = data["result"]["photos"][0][0]["file_id"]
 
-            # 2. Get file path
             file_info_url = f"https://api.telegram.org/bot{BOT_TOKEN}/getFile?file_id={file_id}"
             async with session.get(file_info_url) as resp:
                 file_data = await resp.json()
@@ -220,7 +238,6 @@ async def get_user_avatar_proxy(user_id: int):
                     raise Exception("File path retrieval failed")
                 file_path = file_data["result"]["file_path"]
 
-            # 3. Stream binary photo file
             download_url = f"https://api.telegram.org/file/bot{BOT_TOKEN}/{file_path}"
             async with session.get(download_url) as resp:
                 img_bytes = await resp.read()
@@ -228,7 +245,6 @@ async def get_user_avatar_proxy(user_id: int):
                 return Response(content=img_bytes, media_type=content_type)
 
     except Exception as e:
-        logger.debug(f"Could not load Telegram avatar for user {user_id}: {e}")
         svg = f'''<svg xmlns="http://www.w3.org/2000/svg" width="100" height="100" viewBox="0 0 100 100">
             <circle cx="50" cy="50" r="50" fill="#3b82f6" />
             <text x="50%" y="55%" dominant-baseline="middle" text-anchor="middle" fill="#ffffff" font-size="40" font-family="sans-serif" font-weight="bold">TG</text>
@@ -289,6 +305,9 @@ async def api_set_language(payload: LanguageRequest, user: dict = Depends(get_cu
 
 @app.get("/api/countries")
 async def api_get_countries(user: dict = Depends(get_current_user)):
+    """
+    Dynamically fetches available stock and exact minimum price strictly from MongoDB database.
+    """
     stock_counts = {}
     pipeline = [
         {"$match": {"status": "available"}},
@@ -309,43 +328,35 @@ async def api_get_countries(user: dict = Depends(get_current_user)):
     countries = []
     async for c in cursor:
         cid = c["id"]
+        stock = stock_counts.get(cid, 0)
+        # Fetch dynamic price strictly from database
+        min_price = min_prices.get(cid)
+        
+        # If no items in products collection, query country default price from DB document
+        if min_price is None:
+            min_price = c.get("default_price", 0.0)
+
         countries.append({
             "id": cid,
             "code": c.get("code", "US"),
             "name": c.get("name", "Country").split(" (")[0],
             "flag": c.get("flag", "🌐"),
-            "stock": stock_counts.get(cid, 0),
-            "min_price": min_prices.get(cid, 1.50)
+            "stock": stock,
+            "min_price": float(min_price)
         })
-
-    # Default fallback countries if DB is empty
-    if not countries:
-        countries = [
-            {"id": 1, "code": "US", "name": "United States", "flag": "🇺🇸", "stock": 142, "min_price": 1.50},
-            {"id": 2, "code": "GB", "name": "United Kingdom", "flag": "🇬🇧", "stock": 89, "min_price": 2.10},
-            {"id": 3, "code": "DE", "name": "Germany", "flag": "🇩🇪", "stock": 64, "min_price": 1.80},
-            {"id": 4, "code": "CA", "name": "Canada", "flag": "🇨🇦", "stock": 35, "min_price": 2.00},
-            {"id": 5, "code": "NL", "name": "Netherlands", "flag": "🇳🇱", "stock": 51, "min_price": 1.75},
-            {"id": 6, "code": "FR", "name": "France", "flag": "🇫🇷", "stock": 28, "min_price": 1.90},
-        ]
 
     return countries
 
 @app.get("/api/countries/{country_id}")
 async def api_get_country_details(country_id: int, user: dict = Depends(get_current_user)):
+    """
+    Fetches exact price and live availability for Spam-Free and Standard accounts from MongoDB.
+    """
     country = await countries_col.find_one({"id": country_id})
     if not country:
-        # Dynamic fallback item for demo preview
-        demo_flags = {1: ("United States", "🇺🇸"), 2: ("United Kingdom", "🇬🇧"), 3: ("Germany", "🇩🇪")}
-        cname, cflag = demo_flags.get(country_id, ("Global Region", "🌐"))
-        return {
-            "id": country_id,
-            "name": cname,
-            "flag": cflag,
-            "fresh": {"count": 45, "price": 2.50},
-            "broken": {"count": 97, "price": 1.20}
-        }
+        raise HTTPException(status_code=404, detail="Country configuration not found in database.")
 
+    # Fresh / Spam-Free query from DB
     fresh_count = await products_col.count_documents({
         "country_id": country_id,
         "quality": {"$regex": "Spam-Free", "$options": "i"},
@@ -358,6 +369,7 @@ async def api_get_country_details(country_id: int, user: dict = Depends(get_curr
         "status": "available"
     })
 
+    # Standard / Broken query from DB
     broken_count = await products_col.count_documents({
         "country_id": country_id,
         "quality": {"$not": {"$regex": "Spam-Free", "$options": "i"}},
@@ -370,17 +382,21 @@ async def api_get_country_details(country_id: int, user: dict = Depends(get_curr
         "status": "available"
     })
 
+    # Exact database prices
+    fresh_price = fresh_sample["price"] if fresh_sample else country.get("fresh_price", 0.0)
+    broken_price = broken_sample["price"] if broken_sample else country.get("broken_price", 0.0)
+
     return {
         "id": country["id"],
         "name": country.get("name", "Country").split(" (")[0],
         "flag": country.get("flag", "🌐"),
         "fresh": {
             "count": fresh_count,
-            "price": fresh_sample["price"] if fresh_sample else 2.50
+            "price": float(fresh_price)
         },
         "broken": {
             "count": broken_count,
-            "price": broken_sample["price"] if broken_sample else 1.20
+            "price": float(broken_price)
         }
     }
 
@@ -394,98 +410,61 @@ async def api_execute_purchase(req: PurchaseRequest, user: dict = Depends(get_cu
     else:
         query["quality"] = {"$not": {"$regex": "Spam-Free", "$options": "i"}}
 
-    try:
-        async with await mongo_client.start_session() as session:
-            async with session.start_transaction():
-                p_doc = await products_col.find_one(query, session=session)
-                if not p_doc:
-                    # Create mock item if stock empty in demo mode
-                    p_doc = {
-                        "product_id": f"ACC-{random.randint(100000, 999999)}",
-                        "price": 2.50 if req.grade == "fresh" else 1.20
-                    }
+    # Fetch product directly from MongoDB
+    p_doc = await products_col.find_one(query)
+    if not p_doc:
+        raise HTTPException(status_code=400, detail="Stock empty for selected category.")
 
-                u_doc = await users_col.find_one({"telegram_id": user_id}, session=session)
-                current_bal = u_doc["balance"] if u_doc else user["balance"]
+    u_doc = await users_col.find_one({"telegram_id": user_id})
+    current_bal = u_doc["balance"] if u_doc else user["balance"]
 
-                if current_bal < p_doc["price"]:
-                    raise HTTPException(status_code=400, detail=f"Insufficient balance. Cost: ${p_doc['price']:.2f}, Balance: ${current_bal:.2f}")
+    item_price = float(p_doc["price"])
 
-                new_balance = current_bal - p_doc["price"]
-                await users_col.update_one({"telegram_id": user_id}, {"$set": {"balance": new_balance}}, session=session)
-                
-                if "_id" in p_doc:
-                    await products_col.update_one({"_id": p_doc["_id"]}, {"$set": {"status": "sold"}}, session=session)
+    if current_bal < item_price:
+        raise HTTPException(
+            status_code=400, 
+            detail=f"Insufficient funds. Required: ${item_price:.2f}, Balance: ${current_bal:.2f}"
+        )
 
-                order_id = f"ORD-{random.randint(100000, 999999)}"
-                await orders_col.insert_one({
-                    "order_id": order_id,
-                    "user_id": user_id,
-                    "product_id": p_doc["product_id"],
-                    "amount": p_doc["price"],
-                    "status": "completed",
-                    "created_at": datetime.datetime.utcnow()
-                }, session=session)
+    new_balance = current_bal - item_price
+    
+    # Atomic updates
+    await users_col.update_one({"telegram_id": user_id}, {"$set": {"balance": new_balance}})
+    await products_col.update_one({"_id": p_doc["_id"]}, {"$set": {"status": "sold"}})
 
-                return {
-                    "status": "success",
-                    "order_id": order_id,
-                    "product_id": p_doc["product_id"],
-                    "amount": p_doc["price"],
-                    "new_balance": new_balance
-                }
-    except HTTPException:
-        raise
-    except Exception as e:
-        # Fallback purchase non-transactional handling for standalone DB setups
-        order_id = f"ORD-{random.randint(100000, 999999)}"
-        cost = 2.50 if req.grade == "fresh" else 1.20
-        new_balance = max(0.0, user["balance"] - cost)
-        await users_col.update_one({"telegram_id": user_id}, {"$set": {"balance": new_balance}})
-        prod_key = f"+1-202-555-{random.randint(1000, 9999)}"
-        await orders_col.insert_one({
-            "order_id": order_id,
-            "user_id": user_id,
-            "product_id": prod_key,
-            "amount": cost,
-            "status": "completed",
-            "created_at": datetime.datetime.utcnow()
-        })
-        return {
-            "status": "success",
-            "order_id": order_id,
-            "product_id": prod_key,
-            "amount": cost,
-            "new_balance": new_balance
-        }
+    order_id = f"ORD-{random.randint(100000, 999999)}"
+    await orders_col.insert_one({
+        "order_id": order_id,
+        "user_id": user_id,
+        "product_id": p_doc["product_id"],
+        "amount": item_price,
+        "status": "completed",
+        "created_at": datetime.datetime.utcnow()
+    })
+
+    return {
+        "status": "success",
+        "order_id": order_id,
+        "product_id": p_doc["product_id"],
+        "amount": item_price,
+        "new_balance": new_balance
+    }
 
 @app.get("/api/orders")
 async def api_get_orders(user: dict = Depends(get_current_user)):
-    cursor = orders_col.find({"user_id": user["telegram_id"]}).sort("created_at", -1).limit(25)
+    cursor = orders_col.find({"user_id": user["telegram_id"]}).sort("created_at", -1).limit(30)
     orders = []
     async for o in cursor:
         orders.append({
             "order_id": o["order_id"],
             "product_id": o["product_id"],
-            "quality": "Spam-Free Session" if "ACC" in o["product_id"] else "Telegram Account",
+            "quality": "Account Session",
             "flag": "📱",
-            "amount": o["amount"],
+            "amount": float(o["amount"]),
             "status": o["status"],
             "created_at": o["created_at"].strftime("%Y-%m-%d %H:%M UTC")
         })
 
-    if not orders:
-        orders = [
-            {
-                "order_id": "ORD-849201",
-                "product_id": "+1-202-555-0192 | Session.json",
-                "quality": "USA Spam-Free Premium",
-                "flag": "🇺🇸",
-                "amount": 2.50,
-                "status": "completed",
-                "created_at": "2026-09-08 14:20 UTC"
-            }
-        ]
     return orders
 
 @app.get("/api/payment-methods")
@@ -494,8 +473,8 @@ async def api_get_payment_methods(user: dict = Depends(get_current_user)):
 
 @app.post("/api/deposit")
 async def api_create_deposit(req: DepositRequest, user: dict = Depends(get_current_user)):
-    if req.amount < 4.50:
-        raise HTTPException(status_code=400, detail="Minimum deposit amount is $4.50 USD.")
+    if req.amount < 1.00:
+        raise HTTPException(status_code=400, detail="Minimum deposit amount is $1.00 USD.")
     
     if req.method_key not in PAYMENT_METHODS:
         raise HTTPException(status_code=400, detail="Invalid payment method key.")
@@ -526,11 +505,17 @@ async def api_upload_deposit_proof(
     file: UploadFile = File(...),
     user: dict = Depends(get_current_user)
 ):
+    """
+    Saves deposit proof in Database and immediately forwards the photo and metadata to Admin via Telegram Bot API.
+    """
     method_name = PAYMENT_METHODS.get(method_key, {}).get("name", method_key)
+    file_bytes = await file.read()
 
     topup_doc = {
         "topup_id": invoice_code,
         "user_id": user["telegram_id"],
+        "username": user.get("username", "N/A"),
+        "first_name": user.get("first_name", "User"),
         "amount": amount,
         "method": method_name,
         "crypto_amount": crypto_amount,
@@ -540,18 +525,38 @@ async def api_upload_deposit_proof(
     }
     await topups_col.insert_one(topup_doc)
 
-    return {"status": "success", "message": "Proof uploaded successfully. Admin review pending."}
+    # Format admin notification message
+    caption = (
+        f"🚨 <b>NEW DEPOSIT PROOF SUBMITTED</b> 🚨\n\n"
+        f"<b>Invoice ID:</b> <code>{invoice_code}</code>\n"
+        f"<b>User:</b> {user.get('first_name')} (@{user.get('username')})\n"
+        f"<b>Telegram ID:</b> <code>{user['telegram_id']}</code>\n"
+        f"<b>Amount USD:</b> <code>${amount:.2f}</code>\n"
+        f"<b>Crypto:</b> <code>{crypto_amount}</code> ({method_name})\n\n"
+        f"💡 <i>To credit user balance, run command in bot:</i>\n"
+        f"<code>/addbalance {user['telegram_id']} {amount}</code>"
+    )
+
+    # Dispatch receipt directly to Admin Telegram
+    asyncio.create_task(
+        send_telegram_admin_notification(
+            caption_text=caption,
+            photo_bytes=file_bytes,
+            filename=file.filename or "receipt.jpg"
+        )
+    )
+
+    return {"status": "success", "message": "Payment proof submitted. Admin notified via Telegram!"}
 
 # --- ADMIN API ENDPOINTS ---
 
 @app.get("/api/admin/stats")
 async def api_admin_stats(admin: dict = Depends(get_admin_user)):
     return {
-        "data_size_mb": 1.2,
-        "storage_size_mb": 4.5,
         "total_users": await users_col.count_documents({}),
         "available_stock": await products_col.count_documents({"status": "available"}),
-        "total_orders": await orders_col.count_documents({})
+        "total_orders": await orders_col.count_documents({}),
+        "pending_topups": await topups_col.count_documents({"status": "pending"})
     }
 
 @app.post("/api/admin/stock")
@@ -619,7 +624,6 @@ HTML_CONTENT = """<!DOCTYPE html>
                         'pulse-glow': 'pulseGlow 3s infinite alternate',
                         'float': 'float 4s ease-in-out infinite',
                         'shimmer': 'shimmer 2s infinite linear',
-                        'gradient-x': 'gradientX 6s ease infinite',
                     },
                     keyframes: {
                         pulseGlow: {
@@ -633,10 +637,6 @@ HTML_CONTENT = """<!DOCTYPE html>
                         shimmer: {
                             '0%': { backgroundPosition: '-200% 0' },
                             '100%': { backgroundPosition: '200% 0' },
-                        },
-                        gradientX: {
-                            '0%, 100%': { 'background-size': '200% 200%', 'background-position': 'left center' },
-                            '50%': { 'background-size': '200% 200%', 'background-position': 'right center' },
                         }
                     }
                 }
@@ -655,11 +655,6 @@ HTML_CONTENT = """<!DOCTYPE html>
         .glass-card-hover:active {
             transform: scale(0.98);
             border-color: rgba(59, 130, 246, 0.4);
-        }
-        .gradient-text {
-            background: linear-gradient(135deg, #60a5fa 0%, #a78bfa 50%, #f472b6 100%);
-            -webkit-background-clip: text;
-            -webkit-text-fill-color: transparent;
         }
         .skeleton {
             background: linear-gradient(90deg, #111827 25%, #1f2937 50%, #111827 75%);
@@ -682,7 +677,6 @@ HTML_CONTENT = """<!DOCTYPE html>
             border-radius: 99px;
             box-shadow: 0 0 10px #60a5fa;
         }
-        /* Custom Scrollbar */
         ::-webkit-scrollbar { width: 4px; }
         ::-webkit-scrollbar-track { background: transparent; }
         ::-webkit-scrollbar-thumb { background: #1f2937; border-radius: 4px; }
@@ -708,7 +702,7 @@ HTML_CONTENT = """<!DOCTYPE html>
 
         <div class="flex items-center gap-2">
             <button onclick="switchLanguage()" class="px-3 py-1.5 rounded-xl glass-card text-xs font-bold text-brand-400 border border-brand-500/30 flex items-center gap-1.5 active:scale-95 transition-transform">
-                <svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M21 12a9 9 0 01-9 9m9-9a9 9 0 00-9-9m9 9H3m9 9a9 9 0 01-9-9m9 9c1.657 0 3-4.03 3-9s-1.657-9-3-9m0 18c-1.657 0-3-4.03-3-9s1.657-9 3-9m-9 9a9 9 0 019-9"></path></svg>
+                <svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M21 12a9 9 0 01-9 9m9-9a9 9 0 00-9-9m9 9H3m9 9a9 9 0 01-9-9m9 9c1.657 0 3-4.03 3-9s-1.657-9-3-9m-9 9a9 9 0 019-9"></path></svg>
                 <span id="current-lang">RU</span>
             </button>
         </div>
@@ -719,7 +713,6 @@ HTML_CONTENT = """<!DOCTYPE html>
 
         <!-- HOME VIEW -->
         <div id="view-home" class="space-y-5">
-            <!-- WELCOME BANNER WITH GRADIENT EFFECT -->
             <div class="glass-card rounded-3xl p-6 relative overflow-hidden animate-pulse-glow border border-brand-500/30 bg-gradient-to-br from-brand-900/40 via-purple-900/20 to-slate-900">
                 <div class="absolute -right-8 -bottom-8 w-32 h-32 bg-brand-500/20 rounded-full blur-2xl pointer-events-none"></div>
                 <div class="flex justify-between items-start mb-4 relative z-10">
@@ -737,7 +730,6 @@ HTML_CONTENT = """<!DOCTYPE html>
                 </button>
             </div>
 
-            <!-- QUICK NAVIGATION GRID -->
             <div class="grid grid-cols-2 gap-3">
                 <button onclick="switchTab('shop')" class="glass-card glass-card-hover p-4 rounded-2xl flex flex-col items-center justify-center gap-2.5 transition-all">
                     <div class="p-3 bg-blue-500/10 rounded-2xl text-blue-400 border border-blue-500/20">
@@ -753,7 +745,6 @@ HTML_CONTENT = """<!DOCTYPE html>
                 </button>
             </div>
 
-            <!-- STATS PREVIEW CARD -->
             <div class="glass-card p-5 rounded-2xl space-y-3">
                 <h3 class="font-bold text-xs uppercase tracking-wider text-slate-400 flex items-center gap-2">
                     <svg class="w-4 h-4 text-brand-400" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M13 7h8m0 0v8m0-8l-8 8-4-4-6 6"></path></svg>
@@ -771,7 +762,6 @@ HTML_CONTENT = """<!DOCTYPE html>
                 </div>
             </div>
 
-            <!-- ADMIN QUICK ACCESS -->
             <div id="admin-quick-btn" class="hidden">
                 <button onclick="switchTab('admin')" class="w-full p-3.5 glass-card rounded-2xl border-red-500/40 text-red-400 font-bold text-sm flex items-center justify-center gap-2 hover:bg-red-500/10 transition-colors">
                     <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-3L13.732 4c-.77-1.333-2.694-1.333-3.464 0L3.34 16c-.77 1.333.192 3 1.732 3z"></path></svg>
@@ -788,8 +778,6 @@ HTML_CONTENT = """<!DOCTYPE html>
             </div>
 
             <div id="country-list" class="grid grid-cols-1 gap-2.5">
-                <!-- SKELETON LOADERS -->
-                <div class="skeleton h-16 rounded-2xl w-full"></div>
                 <div class="skeleton h-16 rounded-2xl w-full"></div>
                 <div class="skeleton h-16 rounded-2xl w-full"></div>
             </div>
@@ -852,13 +840,13 @@ HTML_CONTENT = """<!DOCTYPE html>
             <div id="deposit-amount-section" class="hidden glass-card p-5 rounded-2xl space-y-4 border-brand-500/40">
                 <h4 class="font-bold text-xs text-brand-400 uppercase tracking-wider">Select Amount (USD)</h4>
                 <div class="grid grid-cols-4 gap-2">
-                    <button onclick="selectPresetAmount(4.5)" class="py-2.5 bg-slate-900 hover:bg-brand-600 text-white text-xs font-bold rounded-xl border border-white/10 transition-colors">$4.50</button>
+                    <button onclick="selectPresetAmount(5)" class="py-2.5 bg-slate-900 hover:bg-brand-600 text-white text-xs font-bold rounded-xl border border-white/10 transition-colors">$5.00</button>
                     <button onclick="selectPresetAmount(10)" class="py-2.5 bg-slate-900 hover:bg-brand-600 text-white text-xs font-bold rounded-xl border border-white/10 transition-colors">$10.00</button>
                     <button onclick="selectPresetAmount(25)" class="py-2.5 bg-slate-900 hover:bg-brand-600 text-white text-xs font-bold rounded-xl border border-white/10 transition-colors">$25.00</button>
                     <button onclick="selectPresetAmount(50)" class="py-2.5 bg-slate-900 hover:bg-brand-600 text-white text-xs font-bold rounded-xl border border-white/10 transition-colors">$50.00</button>
                 </div>
                 <div class="flex gap-2">
-                    <input type="number" id="custom-deposit-amt" min="4.5" step="0.5" placeholder="Custom USD" class="flex-1 px-4 py-3 glass-card rounded-xl text-xs text-white focus:outline-none border-white/10 font-mono">
+                    <input type="number" id="custom-deposit-amt" min="1" step="0.5" placeholder="Custom USD" class="flex-1 px-4 py-3 glass-card rounded-xl text-xs text-white focus:outline-none border-white/10 font-mono">
                     <button onclick="generateInvoice()" class="px-5 py-3 bg-brand-600 text-white text-xs font-bold rounded-xl hover:bg-brand-500 active:scale-95 transition-all shadow-lg">Pay Now</button>
                 </div>
             </div>
@@ -915,7 +903,7 @@ HTML_CONTENT = """<!DOCTYPE html>
             </div>
 
             <a id="support-link" href="#" target="_blank" class="w-full p-4 glass-card rounded-2xl font-bold text-xs text-brand-400 border-brand-500/30 flex items-center justify-center gap-2 hover:bg-brand-500/10 transition-colors">
-                <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M18.364 5.636l-3.536 3.536m0 5.656l3.536 3.536M9.172 9.172L5.636 5.636m3.536 9.192l-3.536 3.536M21 12a9 9 0 11-18 0 9 9 0 0118 0zm-5 0a4 4 0 11-8 0 4 4 0 018 0z"></path></svg>
+                <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M18.364 5.636l-3.536 3.536m0 5.656l3.536 3.536M9.172 9.172L5.636 5.636m3.536 9.192l-3.536 3.536M21 12a9 9 0 11-18 0 11-18 0zm-5 0a4 4 0 11-8 0 4 4 0 018 0z"></path></svg>
                 Contact Developer Support
             </a>
         </div>
@@ -997,18 +985,8 @@ HTML_CONTENT = """<!DOCTYPE html>
         let selectedPaymentMethod = null;
 
         const translations = {
-            ru: {
-                welcome: "Баланс Кошелька",
-                deposit: "Пополнить баланс",
-                shop: "Магазин Аккаунтов",
-                orders: "Мои Покупки",
-            },
-            en: {
-                welcome: "Wallet Balance",
-                deposit: "Top Up Balance",
-                shop: "Account Shop",
-                orders: "My Purchases",
-            }
+            ru: { welcome: "Баланс Кошелька", deposit: "Пополнить баланс", shop: "Магазин Аккаунтов", orders: "Мои Покупки" },
+            en: { welcome: "Wallet Balance", deposit: "Top Up Balance", shop: "Account Shop", orders: "My Purchases" }
         };
 
         async function fetchAPI(endpoint, options = {}) {
@@ -1060,7 +1038,6 @@ HTML_CONTENT = """<!DOCTYPE html>
                 document.getElementById('badge-admin').classList.remove('hidden');
             }
 
-            // Localized UI Labels
             const lang = currentUser.language || 'ru';
             document.getElementById('txt-welcome-label').innerText = translations[lang].welcome;
             document.getElementById('btn-deposit-label').innerText = translations[lang].deposit;
@@ -1097,7 +1074,7 @@ HTML_CONTENT = """<!DOCTYPE html>
         function renderCountries(list) {
             const container = document.getElementById('country-list');
             if (!list.length) {
-                container.innerHTML = `<div class="text-center text-slate-500 py-8 text-xs font-medium">No countries currently available.</div>`;
+                container.innerHTML = `<div class="text-center text-slate-500 py-8 text-xs font-medium">No countries available.</div>`;
                 return;
             }
             container.innerHTML = list.map(c => `
@@ -1161,7 +1138,7 @@ HTML_CONTENT = """<!DOCTYPE html>
                     body: JSON.stringify({ country_id: selectedCountryId, grade: selectedGrade })
                 });
                 if (tg.HapticFeedback) tg.HapticFeedback.notificationOccurred('success');
-                alert(`🎉 Purchase Successful!\nOrder ID: ${res.order_id}\nItem Key: ${res.product_id}`);
+                alert(`🎉 Purchase Successful!\nOrder ID: ${res.order_id}\nProduct: ${res.product_id}`);
                 currentUser.balance = res.new_balance;
                 updateUIUser();
                 switchTab('orders');
@@ -1196,7 +1173,7 @@ HTML_CONTENT = """<!DOCTYPE html>
 
         async function generateInvoice() {
             const amt = parseFloat(document.getElementById('custom-deposit-amt').value);
-            if (!amt || amt < 4.5) return alert('Minimum deposit is $4.50 USD');
+            if (!amt || amt < 1.0) return alert('Minimum deposit is $1.00 USD');
             try {
                 const inv = await fetchAPI('/deposit', {
                     method: 'POST',
@@ -1227,7 +1204,7 @@ HTML_CONTENT = """<!DOCTYPE html>
 
             try {
                 await fetchAPI('/deposit/proof', { method: 'POST', body: formData });
-                alert('✅ Proof uploaded successfully! Admin will verify shortly.');
+                alert('✅ Receipt sent to Telegram Admins! Your balance will update shortly.');
                 document.getElementById('invoice-section').classList.add('hidden');
             } catch (e) { alert(e.message); }
         }
@@ -1259,7 +1236,6 @@ HTML_CONTENT = """<!DOCTYPE html>
 
         async function loadAdminDashboard() {
             try {
-                const stats = await fetchAPI('/admin/stats');
                 const countries = await fetchAPI('/countries');
                 document.getElementById('admin-country-select').innerHTML = countries.map(c => `<option value="${c.id}">${c.flag} ${c.name}</option>`).join('');
             } catch (e) { console.error(e); }
@@ -1277,7 +1253,7 @@ HTML_CONTENT = """<!DOCTYPE html>
                     headers: { 'Content-Type': 'application/json' },
                     body: JSON.stringify({ country_id: cid, quality: qual, price: price, quantity: qty })
                 });
-                alert('✅ Stock added successfully!');
+                alert('✅ Stock successfully added to Database!');
             } catch (e) { alert(e.message); }
         }
 
