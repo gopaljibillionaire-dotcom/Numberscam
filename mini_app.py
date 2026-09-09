@@ -1163,7 +1163,7 @@ HTML_CONTENT = f"""<!DOCTYPE html>
                 if (!orders.length) {{
                     container.innerHTML = `<div class="text-center text-slate-500 py-8 text-xs font-medium">No purchase history found.</div>`;
                     return;
-                
+                }}
                 container.innerHTML = orders.map(o => `
                     <div class="glass-card p-4 rounded-2xl space-y-2 border-white/5">
                         <div class="flex justify-between items-center text-xs">
@@ -1232,4 +1232,4 @@ async def serve_webapp():
 if __name__ == "__main__":
     import uvicorn
     port = int(os.environ.get("PORT", 8080))
-    uvicorn.run("mini_app:app", host="0.0.0.0", port=port, reload=False)
+    uvicorn.run(app, host="0.0.0.0", port=port)
