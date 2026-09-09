@@ -49,7 +49,7 @@ orders_col = db["orders"]
 topups_col = db["topups"]
 
 # Initialize FastAPI App
-app = FastAPI(title="Digital Store Ultra Mini App", version="2.6.0")
+app = FastAPI(title="Digital Store Ultra Mini App", version="2.7.0")
 
 app.add_middleware(
     CORSMiddleware,
@@ -176,20 +176,6 @@ async def get_admin_user(current_user: dict = Depends(get_current_user)) -> dict
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Admin access denied.")
     return current_user
 
-async def get_crypto_price_usd(coin_id: str) -> float:
-    if not coin_id or coin_id == "tether":
-        return 1.0
-    url = f"https://api.coingecko.com/api/v3/simple/price?ids={coin_id}&vs_currencies=usd"
-    try:
-        async with aiohttp.ClientSession() as session:
-            async with session.get(url, timeout=5) as resp:
-                if resp.status == 200:
-                    data = await resp.json()
-                    return float(data[coin_id]["usd"])
-    except Exception as e:
-        logger.warning(f"Failed to fetch live price for {coin_id}: {e}. Using fallback.")
-    return FALLBACK_PRICES.get(coin_id, 1.0)
-
 # --- TELEGRAM USER AVATAR PROXY ---
 
 @app.get("/api/user/avatar/{user_id}")
@@ -242,10 +228,6 @@ async def get_user_avatar_proxy(user_id: int):
 class PurchaseRequest(BaseModel):
     country_id: int
     grade: str
-
-class DepositRequest(BaseModel):
-    method_key: str
-    amount: float
 
 class LanguageRequest(BaseModel):
     language: str
@@ -316,11 +298,13 @@ async def api_get_countries(user: dict = Depends(get_current_user)):
         if min_price is None:
             min_price = c.get("default_price", 0.0)
 
+        flag_symbol = c.get("flag", "").strip() or "🌐"
+
         countries.append({
             "id": cid,
             "code": c.get("code", "US"),
             "name": c.get("name", "Country").split(" (")[0],
-            "flag": c.get("flag", "🌐"),
+            "flag": flag_symbol,
             "stock": stock,
             "min_price": float(min_price)
         })
@@ -439,82 +423,6 @@ async def api_get_orders(user: dict = Depends(get_current_user)):
 
     return orders
 
-@app.get("/api/payment-methods")
-async def api_get_payment_methods(user: dict = Depends(get_current_user)):
-    return PAYMENT_METHODS
-
-@app.post("/api/deposit")
-async def api_create_deposit(req: DepositRequest, user: dict = Depends(get_current_user)):
-    if req.amount < MIN_DEPOSIT_USD:
-        raise HTTPException(status_code=400, detail=f"Minimum deposit amount is ${MIN_DEPOSIT_USD:.2f} USD.")
-    
-    if req.method_key not in PAYMENT_METHODS:
-        raise HTTPException(status_code=400, detail="Invalid payment method key.")
-
-    method_info = PAYMENT_METHODS[req.method_key]
-    invoice_code = f"INV-{random.randint(10000, 99999)}"
-    crypto_price = await get_crypto_price_usd(method_info.get("coingecko_id", "tether"))
-    calculated = req.amount / crypto_price
-    unique_offset = random.randint(1, 99) * 0.0001
-    coin_amount = f"{calculated + unique_offset:.4f}"
-
-    return {
-        "invoice_code": invoice_code,
-        "amount_usd": req.amount,
-        "crypto_amount": coin_amount,
-        "ticker": method_info.get("ticker", "USDT"),
-        "network": method_info.get("name", req.method_key),
-        "address": method_info.get("address", ""),
-        "memo": method_info.get("memo", "")
-    }
-
-@app.post("/api/deposit/proof")
-async def api_upload_deposit_proof(
-    invoice_code: str = Form(...),
-    amount: float = Form(...),
-    crypto_amount: str = Form(...),
-    method_key: str = Form(...),
-    file: UploadFile = File(...),
-    user: dict = Depends(get_current_user)
-):
-    method_name = PAYMENT_METHODS.get(method_key, {}).get("name", method_key)
-    file_bytes = await file.read()
-
-    topup_doc = {
-        "topup_id": invoice_code,
-        "user_id": user["telegram_id"],
-        "username": user.get("username", "N/A"),
-        "first_name": user.get("first_name", "User"),
-        "amount": amount,
-        "method": method_name,
-        "crypto_amount": crypto_amount,
-        "status": "pending",
-        "proof_filename": file.filename,
-        "created_at": datetime.datetime.utcnow()
-    }
-    await topups_col.insert_one(topup_doc)
-
-    caption = (
-        f"🚨 <b>NEW DEPOSIT PROOF SUBMITTED</b> 🚨\n\n"
-        f"<b>Invoice ID:</b> <code>{invoice_code}</code>\n"
-        f"<b>User:</b> {user.get('first_name')} (@{user.get('username')})\n"
-        f"<b>Telegram ID:</b> <code>{user['telegram_id']}</code>\n"
-        f"<b>Amount USD:</b> <code>${amount:.2f}</code>\n"
-        f"<b>Crypto:</b> <code>{crypto_amount}</code> ({method_name})\n\n"
-        f"💡 <i>To credit user balance, run command in bot:</i>\n"
-        f"<code>/addbalance {user['telegram_id']} {amount}</code>"
-    )
-
-    asyncio.create_task(
-        send_telegram_admin_notification(
-            caption_text=caption,
-            photo_bytes=file_bytes,
-            filename=file.filename or "receipt.jpg"
-        )
-    )
-
-    return {"status": "success", "message": "Payment proof submitted to Admin!"}
-
 # --- ADMIN API ENDPOINTS ---
 
 @app.get("/api/admin/stats")
@@ -548,7 +456,7 @@ async def api_admin_add_stock(req: AdminAddStockRequest, admin: dict = Depends(g
 
     return {"status": "success", "added": req.quantity}
 
-# --- EMBEDDED HIGH-PERFORMANCE FRONTEND WEBAPP ---
+# --- EMBEDDED FRONTEND WEBAPP ---
 
 HTML_CONTENT = f"""<!DOCTYPE html>
 <html lang="en" class="dark">
@@ -558,14 +466,14 @@ HTML_CONTENT = f"""<!DOCTYPE html>
     <title>Digital Marketplace Mini App</title>
     <script src="https://telegram.org/js/telegram-web-app.js"></script>
     <script src="https://cdn.tailwindcss.com"></script>
-    <link href="https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@300;400;500;600;700;800&family=JetBrains+Mono:wght@400;600&display=swap" rel="stylesheet">
+    <link href="https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@300;400;500;600;700;800&family=JetBrains+Mono:wght@400;600&family=Noto+Color+Emoji&display=swap" rel="stylesheet">
     <script>
         tailwind.config = {{
             darkMode: 'class',
             theme: {{
                 extend: {{
                     fontFamily: {{
-                        sans: ['Plus Jakarta Sans', 'sans-serif'],
+                        sans: ['Plus Jakarta Sans', 'Noto Color Emoji', 'sans-serif'],
                         mono: ['JetBrains Mono', 'monospace'],
                     }},
                     colors: {{
@@ -621,6 +529,15 @@ HTML_CONTENT = f"""<!DOCTYPE html>
             background: #60a5fa;
             border-radius: 99px;
             box-shadow: 0 0 10px #60a5fa;
+        }}
+        .flag-icon {{
+            font-family: 'Noto Color Emoji', 'Apple Color Emoji', 'Segoe UI Emoji', sans-serif;
+            font-size: 1.75rem;
+            line-height: 1;
+            display: inline-flex;
+            align-items: center;
+            justify-content: center;
+            min-width: 2rem;
         }}
         @keyframes shimmer {{
             0% {{ background-position: -200% 0; }}
@@ -722,7 +639,7 @@ HTML_CONTENT = f"""<!DOCTYPE html>
 
             <div class="glass-card p-5 rounded-2xl flex items-center justify-between border-brand-500/30 bg-gradient-to-r from-brand-900/30 to-slate-900">
                 <div class="flex items-center space-x-3.5">
-                    <span id="detail-flag" class="text-4xl">🌐</span>
+                    <span id="detail-flag" class="flag-icon text-4xl">🌐</span>
                     <div>
                         <h2 id="detail-country-name" class="font-bold text-lg text-white">Country Name</h2>
                         <span class="text-xs text-slate-400">Select grade below</span>
@@ -749,57 +666,33 @@ HTML_CONTENT = f"""<!DOCTYPE html>
             </div>
         </div>
 
-        <!-- WALLET VIEW -->
+        <!-- WALLET VIEW (BOT DEPOSIT NOTICE) -->
         <div id="view-wallet" class="hidden space-y-4">
-            <div class="glass-card p-6 rounded-3xl text-center border-brand-500/30 bg-gradient-to-b from-brand-900/20 to-slate-900">
+            <div class="glass-card p-6 rounded-3xl text-center border-brand-500/30 bg-gradient-to-b from-brand-900/20 to-slate-900 space-y-2">
                 <span class="text-xs text-slate-400 font-bold uppercase tracking-wider">Available Balance</span>
-                <div id="wallet-balance" class="text-4xl font-extrabold text-white mt-1 font-mono tracking-tight">$0.00</div>
+                <div id="wallet-balance" class="text-4xl font-extrabold text-white font-mono tracking-tight">$0.00</div>
             </div>
 
-            <h3 class="font-bold text-xs uppercase tracking-wider text-slate-400">Select Deposit Crypto</h3>
-            <div id="payment-methods-grid" class="grid grid-cols-2 gap-3"></div>
+            <div class="glass-card p-6 rounded-3xl border-brand-500/40 bg-slate-900/90 text-center space-y-5">
+                <div class="w-14 h-14 bg-brand-500/20 text-brand-400 rounded-full flex items-center justify-center mx-auto border border-brand-500/30 shadow-lg">
+                    <svg class="w-7 h-7" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 8c-1.657 0-3 .895-3 2s1.343 2 3 2 3 .895 3 2-1.343 2-3 2m0-8c1.11 0 2.08.402 2.599 1M12 8V6m0 0V4m0 2h.01M12 12v2m0 0v2m0-2h.01M12 16c-1.11 0-2.08-.402-2.599-1M21 12a9 9 0 11-18 0 9 9 0 0118 0z"></path></svg>
+                </div>
 
-            <div id="deposit-amount-section" class="hidden glass-card p-5 rounded-2xl space-y-4 border-brand-500/40">
-                <h4 class="font-bold text-xs text-brand-400 uppercase tracking-wider">Select Amount (USD)</h4>
-                <p class="text-[11px] text-amber-400 font-medium">⚠️ Minimum Deposit: $4.50 USD</p>
-                <div class="grid grid-cols-4 gap-2">
-                    <button onclick="selectPresetAmount(4.50)" class="py-2.5 bg-slate-900 hover:bg-brand-600 text-white text-xs font-bold rounded-xl border border-white/10 transition-colors">$4.50</button>
-                    <button onclick="selectPresetAmount(10)" class="py-2.5 bg-slate-900 hover:bg-brand-600 text-white text-xs font-bold rounded-xl border border-white/10 transition-colors">$10.00</button>
-                    <button onclick="selectPresetAmount(25)" class="py-2.5 bg-slate-900 hover:bg-brand-600 text-white text-xs font-bold rounded-xl border border-white/10 transition-colors">$25.00</button>
-                    <button onclick="selectPresetAmount(50)" class="py-2.5 bg-slate-900 hover:bg-brand-600 text-white text-xs font-bold rounded-xl border border-white/10 transition-colors">$50.00</button>
+                <div class="space-y-2">
+                    <h3 class="font-bold text-lg text-white">Top Up Wallet Balance</h3>
+                    <p class="text-xs text-slate-300 leading-relaxed max-w-xs mx-auto">
+                        To top up your wallet balance, please use our official Telegram Bot interface. Balance deposits are processed automatically and securely inside the bot chat.
+                    </p>
                 </div>
-                <div class="flex gap-2">
-                    <input type="number" id="custom-deposit-amt" min="4.50" step="0.5" placeholder="Custom USD ($4.50 min)" class="flex-1 px-4 py-3 glass-card rounded-xl text-xs text-white focus:outline-none border-white/10 font-mono">
-                    <button onclick="generateInvoice()" class="px-5 py-3 bg-brand-600 text-white text-xs font-bold rounded-xl hover:bg-brand-500 active:scale-95 transition-all shadow-lg">Pay Now</button>
-                </div>
-            </div>
 
-            <div id="invoice-section" class="hidden glass-card p-5 rounded-2xl space-y-4 border-emerald-500/40 bg-slate-900/90">
-                <div class="flex justify-between items-center border-b border-white/10 pb-3">
-                    <span id="invoice-net" class="font-bold text-sm text-brand-400">USDT</span>
-                    <span id="invoice-code" class="text-xs font-mono text-slate-400">INV-00000</span>
-                </div>
-                <div>
-                    <span class="text-xs text-slate-400 block mb-1">Exact Crypto Amount:</span>
-                    <div id="invoice-crypto" class="text-xl font-mono font-bold text-emerald-400">0.0000 USDT</div>
-                </div>
-                <div>
-                    <span class="text-xs text-slate-400 block mb-1">Deposit Address:</span>
-                    <div id="invoice-address" class="text-xs font-mono bg-black/60 p-3 rounded-xl break-all text-slate-200 select-all border border-white/5">0x000...</div>
-                </div>
-                <!-- DYNAMIC MEMO / TAG SECTION -->
-                <div id="memo-container" class="hidden">
-                    <span class="text-xs text-amber-400 font-bold block mb-1">⚠️ Memo / Tag (Required):</span>
-                    <div id="invoice-memo" class="text-xs font-mono bg-amber-500/10 text-amber-300 p-3 rounded-xl break-all select-all border border-amber-500/30 font-bold">----</div>
-                </div>
-                <div class="pt-2 space-y-2">
-                    <button onclick="exitAndSendProof()" class="w-full py-3.5 bg-gradient-to-r from-emerald-600 to-teal-600 hover:opacity-95 text-white font-bold text-xs rounded-xl active:scale-95 transition-all shadow-lg flex items-center justify-center gap-2">
-                        <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M10 6H6a2 2 0 00-2 2v10a2 2 0 002 2h10a2 2 0 002-2v-4M14 4h6m0 0v6m0-6L10 14"></path></svg>
-                        Exit App & Send Payment Proof
+                <div class="pt-2 space-y-3">
+                    <button onclick="openBotTopUp()" class="w-full py-3.5 bg-gradient-to-r from-brand-600 via-purple-600 to-pink-600 hover:opacity-95 text-white font-bold text-sm rounded-2xl active:scale-95 transition-all shadow-xl flex items-center justify-center gap-2">
+                        <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M8 12h.01M12 12h.01M16 12h.01M21 12c0 4.418-4.03 8-9 8a9.863 9.863 0 01-4.255-.949L3 20l1.395-3.72C3.512 15.042 3 13.574 3 12c0-4.418 4.03-8 9-8s9 3.582 9 8z"></path></svg>
+                        Do using Bot
                     </button>
-                    <input type="file" id="proof-file" accept="image/*" class="hidden" onchange="uploadProof(this)">
-                    <button onclick="document.getElementById('proof-file').click()" class="w-full py-2.5 bg-slate-800 hover:bg-slate-700 text-slate-300 font-medium text-xs rounded-xl active:scale-95 transition-all">
-                        Or Upload Receipt Directly Here
+
+                    <button onclick="closeMiniApp()" class="w-full py-3 bg-slate-800/80 hover:bg-slate-700 text-slate-300 font-bold text-xs rounded-xl active:scale-95 transition-all border border-white/5">
+                        Exit App
                     </button>
                 </div>
             </div>
@@ -892,8 +785,6 @@ HTML_CONTENT = f"""<!DOCTYPE html>
         let allCountries = [];
         let selectedCountryId = null;
         let selectedGrade = null;
-        let selectedPaymentMethod = null;
-        let currentInvoiceDetails = null;
 
         const translations = {{
             ru: {{ welcome: "Баланс Кошелька", deposit: "Пополнить баланс", shop: "Магазин Аккаунтов", orders: "Мои Покупки" }},
@@ -970,7 +861,6 @@ HTML_CONTENT = f"""<!DOCTYPE html>
             document.getElementById('view-' + tab)?.classList.remove('hidden');
 
             if (tab === 'shop') loadCountries();
-            if (tab === 'wallet') loadPaymentMethods();
             if (tab === 'orders') loadOrders();
             if (tab === 'admin') loadAdminDashboard();
         }}
@@ -988,10 +878,12 @@ HTML_CONTENT = f"""<!DOCTYPE html>
                 container.innerHTML = `<div class="text-center text-slate-500 py-8 text-xs font-medium">No countries available.</div>`;
                 return;
             }}
-            container.innerHTML = list.map(c => `
+            container.innerHTML = list.map(c => {{
+                const flagDisplay = c.flag && c.flag !== '🌐' ? c.flag : '🌐';
+                return `
                 <div onclick="openCountryDetail(${{c.id}})" class="glass-card glass-card-hover p-4 rounded-2xl flex items-center justify-between transition-all">
                     <div class="flex items-center space-x-3.5">
-                        <span class="text-3xl">${{c.flag}}</span>
+                        <span class="flag-icon">${{flagDisplay}}</span>
                         <div>
                             <div class="font-bold text-sm text-white">${{c.name}}</div>
                             <div class="text-[11px] text-slate-400 font-mono">${{c.stock}} accounts</div>
@@ -1001,7 +893,8 @@ HTML_CONTENT = f"""<!DOCTYPE html>
                         <div class="font-bold text-xs text-emerald-400 font-mono">From $${{c.min_price.toFixed(2)}}</div>
                     </div>
                 </div>
-            `).join('');
+                `;
+            }}).join('');
         }}
 
         function filterCountries() {{
@@ -1013,7 +906,7 @@ HTML_CONTENT = f"""<!DOCTYPE html>
             selectedCountryId = cid;
             try {{
                 const data = await fetchAPI('/countries/' + cid);
-                document.getElementById('detail-flag').innerText = data.flag;
+                document.getElementById('detail-flag').innerText = data.flag || '🌐';
                 document.getElementById('detail-country-name').innerText = data.name;
 
                 document.getElementById('fresh-stock-info').innerText = `Available: ${{data.fresh.count}} | Price: $${{data.fresh.price.toFixed(2)}}`;
@@ -1059,101 +952,22 @@ HTML_CONTENT = f"""<!DOCTYPE html>
             }}
         }}
 
-        async function loadPaymentMethods() {{
-            try {{
-                const methods = await fetchAPI('/payment-methods');
-                const grid = document.getElementById('payment-methods-grid');
-                grid.innerHTML = Object.entries(methods).map(([key, val]) => `
-                    <button onclick="selectPaymentMethod('${{key}}')" class="glass-card glass-card-hover p-3.5 rounded-2xl flex flex-col items-center justify-center gap-1 hover:border-brand-500/50 transition-all">
-                        <span class="font-bold text-xs text-white">${{val.name}}</span>
-                        <span class="text-[10px] text-brand-400 font-mono">${{val.ticker}}</span>
-                    </button>
-                `).join('');
-            }} catch (e) {{ console.error(e); }}
-        }}
-
-        function selectPaymentMethod(key) {{
-            selectedPaymentMethod = key;
-            document.getElementById('deposit-amount-section').classList.remove('hidden');
-        }}
-
-        function selectPresetAmount(amt) {{
-            document.getElementById('custom-deposit-amt').value = amt;
-            generateInvoice();
-        }}
-
-        async function generateInvoice() {{
-            const amt = parseFloat(document.getElementById('custom-deposit-amt').value);
-            if (!amt || amt < 4.50) return alert('Minimum deposit limit is $4.50 USD');
-            try {{
-                const inv = await fetchAPI('/deposit', {{
-                    method: 'POST',
-                    headers: {{ 'Content-Type': 'application/json' }},
-                    body: JSON.stringify({{ method_key: selectedPaymentMethod, amount: amt }})
-                }});
-                currentInvoiceDetails = inv;
-                document.getElementById('invoice-net').innerText = inv.network;
-                document.getElementById('invoice-code').innerText = inv.invoice_code;
-                document.getElementById('invoice-crypto').innerText = `${{inv.crypto_amount}} ${{inv.ticker}}`;
-                document.getElementById('invoice-address').innerText = inv.address;
-
-                // Handle Memo / Tag visibility (e.g. USDT TON)
-                const memoBox = document.getElementById('memo-container');
-                if (inv.memo && inv.memo.trim() !== '') {{
-                    document.getElementById('invoice-memo').innerText = inv.memo;
-                    memoBox.classList.remove('hidden');
-                }} else {{
-                    memoBox.classList.add('hidden');
-                }}
-
-                document.getElementById('invoice-section').classList.remove('hidden');
-            }} catch (e) {{ alert(e.message); }}
-        }}
-
-        function exitAndSendProof() {{
-            if (!currentInvoiceDetails) return;
-            
-            const message = encodeURIComponent(
-                `📸 *PAYMENT RECEIPT SUBMISSION*\n\n` +
-                `*Invoice ID:* \`${{currentInvoiceDetails.invoice_code}}\`\n` +
-                `*Amount USD:* \`$${{currentInvoiceDetails.amount_usd.toFixed(2)}}\`\n` +
-                `*Network:* ${{currentInvoiceDetails.network}}\n` +
-                `*Expected:* \`${{currentInvoiceDetails.crypto_amount}} ${{currentInvoiceDetails.ticker}}\`\n\n` +
-                `_I have sent the payment. Here is my payment receipt/screenshot:_`
-            );
-
-            // Directly opens support / admin DM link with pre-formatted invoice reference
-            const supportUrl = currentUser?.support_url || "{DEVELOPER_SUPPORT_LINK}";
-            const fullLink = `${{supportUrl}}?text=${{message}}`;
-
+        function openBotTopUp() {{
+            const botUrl = currentUser?.support_url || "{DEVELOPER_SUPPORT_LINK}";
             if (tg.openTelegramLink) {{
-                tg.openTelegramLink(fullLink);
+                tg.openTelegramLink(botUrl);
             }} else {{
-                window.open(fullLink, '_blank');
+                window.open(botUrl, '_blank');
             }}
-
             if (tg.close) tg.close();
         }}
 
-        async function uploadProof(input) {{
-            if (!input.files || !input.files[0]) return;
-            const file = input.files[0];
-            const invCode = document.getElementById('invoice-code').innerText;
-            const cryptoAmt = document.getElementById('invoice-crypto').innerText;
-            const amt = parseFloat(document.getElementById('custom-deposit-amt').value);
-
-            const formData = new FormData();
-            formData.append('invoice_code', invCode);
-            formData.append('amount', amt);
-            formData.append('crypto_amount', cryptoAmt);
-            formData.append('method_key', selectedPaymentMethod);
-            formData.append('file', file);
-
-            try {{
-                await fetchAPI('/deposit/proof', {{ method: 'POST', body: formData }});
-                alert('✅ Receipt sent to Telegram Admins! Your balance will update shortly.');
-                document.getElementById('invoice-section').classList.add('hidden');
-            }} catch (e) {{ alert(e.message); }}
+        function closeMiniApp() {{
+            if (tg.close) {{
+                tg.close();
+            }} else {{
+                window.close();
+            }}
         }}
 
         async function loadOrders() {{
@@ -1171,7 +985,7 @@ HTML_CONTENT = f"""<!DOCTYPE html>
                             <span class="text-emerald-400 font-bold font-mono">$${{o.amount.toFixed(2)}}</span>
                         </div>
                         <div class="font-bold text-sm text-white flex items-center gap-2">
-                            <span>${{o.flag}}</span> <span>${{o.quality}}</span>
+                            <span class="flag-icon">${{o.flag}}</span> <span>${{o.quality}}</span>
                         </div>
                         <div class="text-[11px] font-mono text-brand-300 bg-slate-900/90 p-2.5 rounded-xl break-all select-all border border-white/5">
                             ${{o.product_id}}
