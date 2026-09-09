@@ -36,6 +36,9 @@ from countries import ALL_COUNTRIES_DATA
 # Override or fallback support link to @Tgdtax
 SUPPORT_URL = "https://t.me/Tgdtax"
 
+# WebApp URL for native Telegram Mini App (Replace with your direct HTTPS URL or WebApp link)
+MINI_APP_URL = "https://your-mini-app-domain.com" 
+
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s - %(name)s - %(levelname)s - [%(levelname)s] - %(message)s"
@@ -100,13 +103,7 @@ class RechargeFSM(StatesGroup):
 def get_main_keyboard(user_id: int, lang: str = "ru") -> InlineKeyboardMarkup:
     t = TEXTS.get(lang, TEXTS["ru"])
     
-    # Mini App WebApp Link (Points to market portal)
-    mini_app_url = "https://t.me/Tgdtax"  # Replace with your WebApp URL if hosting a web interface
-    
     buttons = [
-        [
-            InlineKeyboardButton(text="🌐 VISIT MARKET", web_app=WebAppInfo(url=mini_app_url))
-        ],
         [
             InlineKeyboardButton(text=t["btn_buy_account"], callback_data="buy_cat:account:1")
         ],
@@ -125,8 +122,15 @@ def get_main_keyboard(user_id: int, lang: str = "ru") -> InlineKeyboardMarkup:
             InlineKeyboardButton(text="🌐 Язык / Language", callback_data="switch_lang")
         ]
     ]
+
     if user_id in ADMIN_IDS:
         buttons.append([InlineKeyboardButton(text=t["btn_admin"], callback_data="admin_panel")])
+
+    # Native Telegram Mini App Button placed at the very end
+    buttons.append([
+        InlineKeyboardButton(text="🌐 VISIT MARKET", web_app=WebAppInfo(url=MINI_APP_URL))
+    ])
+
     return InlineKeyboardMarkup(inline_keyboard=buttons)
 
 def back_home_buttons(lang: str = "ru") -> List[List[InlineKeyboardButton]]:
