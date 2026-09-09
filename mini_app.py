@@ -16,20 +16,28 @@ from motor.motor_asyncio import AsyncIOMotorClient
 import aiohttp
 from pydantic import BaseModel
 
-# Import configuration strictly from config.py
+# Configuration Variables
+BOT_USERNAME = "TG_DTACBOT"
+SUPPORT_USERNAME = "Tgdtax"
+BOT_URL = f"https://t.me/{BOT_USERNAME}"
+SUPPORT_URL = f"https://t.me/{SUPPORT_USERNAME}"
+
+# Configuration strict import fallback
 try:
     from config import (
         BOT_TOKEN,
         ADMIN_IDS,
         MONGO_URI,
         DATABASE_NAME,
-        DEVELOPER_SUPPORT_LINK,
         PAYMENT_METHODS,
         FALLBACK_PRICES,
         TEXTS,
     )
 except ImportError:
-    raise RuntimeError("config.py file is missing or contains invalid configurations.")
+    BOT_TOKEN = os.getenv("BOT_TOKEN", "123456789:ABCdefGHIjklMNOpqrsTUVwxyZ")
+    ADMIN_IDS = [int(x) for x in os.getenv("ADMIN_IDS", "999999999").split(",") if x.isdigit()]
+    MONGO_URI = os.getenv("MONGO_URI", "mongodb://localhost:27017")
+    DATABASE_NAME = os.getenv("DATABASE_NAME", "digital_store_db")
 
 # Setup logging
 logging.basicConfig(
@@ -38,7 +46,7 @@ logging.basicConfig(
 )
 logger = logging.getLogger("digital_store_miniapp")
 
-# --- MONGODB CONNECTION ---
+# MongoDB Setup
 mongo_client = AsyncIOMotorClient(MONGO_URI)
 db = mongo_client[DATABASE_NAME]
 
@@ -49,7 +57,7 @@ orders_col = db["orders"]
 topups_col = db["topups"]
 
 # Initialize FastAPI App
-app = FastAPI(title="Digital Store Ultra Mini App", version="2.7.0")
+app = FastAPI(title="Digital Store Ultra Mini App", version="3.0.0")
 
 app.add_middleware(
     CORSMiddleware,
@@ -216,7 +224,7 @@ async def get_user_avatar_proxy(user_id: int):
                 content_type = resp.headers.get("Content-Type", "image/jpeg")
                 return Response(content=img_bytes, media_type=content_type)
 
-    except Exception as e:
+    except Exception:
         svg = f'''<svg xmlns="http://www.w3.org/2000/svg" width="100" height="100" viewBox="0 0 100 100">
             <circle cx="50" cy="50" r="50" fill="#3b82f6" />
             <text x="50%" y="55%" dominant-baseline="middle" text-anchor="middle" fill="#ffffff" font-size="40" font-family="sans-serif" font-weight="bold">TG</text>
@@ -261,7 +269,10 @@ async def api_get_me(user: dict = Depends(get_current_user)):
         "is_admin": user["telegram_id"] in ADMIN_IDS or user["telegram_id"] == 999999999,
         "total_orders": total_orders,
         "total_spent": total_spent,
-        "support_url": DEVELOPER_SUPPORT_LINK
+        "support_url": SUPPORT_URL,
+        "bot_url": BOT_URL,
+        "bot_username": BOT_USERNAME,
+        "support_username": SUPPORT_USERNAME
     }
 
 @app.post("/api/language")
@@ -463,7 +474,7 @@ HTML_CONTENT = f"""<!DOCTYPE html>
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover">
-    <title>Digital Marketplace Mini App</title>
+    <title>TG_DTACBOT Digital Store</title>
     <script src="https://telegram.org/js/telegram-web-app.js"></script>
     <script src="https://cdn.tailwindcss.com"></script>
     <link href="https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@300;400;500;600;700;800&family=JetBrains+Mono:wght@400;600&family=Noto+Color+Emoji&display=swap" rel="stylesheet">
@@ -478,17 +489,17 @@ HTML_CONTENT = f"""<!DOCTYPE html>
                     }},
                     colors: {{
                         brand: {{
-                            50: '#eff6ff',
-                            100: '#dbeafe',
-                            400: '#60a5fa',
-                            500: '#3b82f6',
-                            600: '#2563eb',
-                            700: '#1d4ed8',
-                            900: '#1e3a8a',
+                            50: '#eef2ff',
+                            100: '#e0e7ff',
+                            400: '#818cf8',
+                            500: '#6366f1',
+                            600: '#4f46e5',
+                            700: '#4338ca',
+                            900: '#312e81',
                         }},
                         dark: {{
-                            bg: '#090d16',
-                            card: '#111827',
+                            bg: '#05070f',
+                            card: '#0f172a',
                             border: 'rgba(255, 255, 255, 0.08)',
                         }}
                     }}
@@ -498,24 +509,27 @@ HTML_CONTENT = f"""<!DOCTYPE html>
     </script>
     <style>
         * {{ -webkit-tap-highlight-color: transparent; user-select: none; }}
-        body {{ background-color: #070a12; color: #f3f4f6; min-height: 100vh; padding-bottom: 90px; }}
+        body {{ background-color: #05070f; color: #f8fafc; min-height: 100vh; padding-bottom: 90px; }}
         .glass-card {{
-            background: linear-gradient(135deg, rgba(255, 255, 255, 0.05) 0%, rgba(255, 255, 255, 0.02) 100%);
-            backdrop-filter: blur(16px);
-            -webkit-backdrop-filter: blur(16px);
+            background: linear-gradient(135deg, rgba(255, 255, 255, 0.04) 0%, rgba(255, 255, 255, 0.01) 100%);
+            backdrop-filter: blur(20px);
+            -webkit-backdrop-filter: blur(20px);
             border: 1px solid rgba(255, 255, 255, 0.08);
         }}
         .glass-card-hover:active {{
             transform: scale(0.98);
-            border-color: rgba(59, 130, 246, 0.4);
+            border-color: rgba(99, 102, 241, 0.5);
+        }}
+        .glow-box {{
+            box-shadow: 0 0 25px -5px rgba(99, 102, 241, 0.3);
         }}
         .skeleton {{
-            background: linear-gradient(90deg, #111827 25%, #1f2937 50%, #111827 75%);
+            background: linear-gradient(90deg, #0f172a 25%, #1e293b 50%, #0f172a 75%);
             background-size: 200% 100%;
             animation: shimmer 1.8s infinite;
         }}
         .nav-active {{
-            color: #60a5fa;
+            color: #818cf8;
             position: relative;
         }}
         .nav-active::after {{
@@ -524,11 +538,11 @@ HTML_CONTENT = f"""<!DOCTYPE html>
             bottom: -6px;
             left: 50%;
             transform: translateX(-50%);
-            width: 16px;
+            width: 18px;
             height: 3px;
-            background: #60a5fa;
+            background: #818cf8;
             border-radius: 99px;
-            box-shadow: 0 0 10px #60a5fa;
+            box-shadow: 0 0 12px #818cf8;
         }}
         .flag-icon {{
             font-family: 'Noto Color Emoji', 'Apple Color Emoji', 'Segoe UI Emoji', sans-serif;
@@ -547,19 +561,21 @@ HTML_CONTENT = f"""<!DOCTYPE html>
 </head>
 <body class="font-sans antialiased selection:bg-brand-500 selection:text-white">
 
-    <!-- TOP HEADER -->
-    <header class="p-4 flex items-center justify-between border-b border-white/10 sticky top-0 bg-[#070a12]/90 backdrop-blur-xl z-40">
+    <!-- TOP HEADER WITH LOGO -->
+    <header class="p-4 flex items-center justify-between border-b border-white/10 sticky top-0 bg-[#05070f]/90 backdrop-blur-xl z-40">
         <div class="flex items-center space-x-3">
             <div class="relative">
-                <img id="user-avatar-img" src="/api/user/avatar/0" alt="Avatar" class="w-10 h-10 rounded-full object-cover border-2 border-brand-500/50 shadow-md">
-                <div class="absolute -bottom-0.5 -right-0.5 w-3.5 h-3.5 bg-emerald-500 rounded-full border-2 border-[#070a12]"></div>
+                <div class="w-10 h-10 rounded-2xl bg-gradient-to-tr from-brand-600 via-purple-600 to-pink-500 flex items-center justify-center font-black text-white text-xl shadow-lg border border-white/20">
+                    D
+                </div>
+                <div class="absolute -bottom-0.5 -right-0.5 w-3.5 h-3.5 bg-emerald-500 rounded-full border-2 border-[#05070f]"></div>
             </div>
             <div>
                 <div class="flex items-center gap-1.5">
-                    <h1 id="user-name" class="font-bold text-sm tracking-tight text-white leading-none">Loading...</h1>
+                    <h1 class="font-black text-sm tracking-wide text-white leading-none bg-gradient-to-r from-white via-slate-200 to-brand-400 bg-clip-text text-transparent">@{BOT_USERNAME}</h1>
                     <span id="badge-admin" class="hidden text-[9px] font-extrabold bg-red-500/20 text-red-400 px-1.5 py-0.5 rounded border border-red-500/30">ADMIN</span>
                 </div>
-                <span id="user-tg-id" class="text-xs text-slate-400 font-mono tracking-wide">ID: ------</span>
+                <span id="user-tg-id" class="text-[11px] text-slate-400 font-mono tracking-wide">ID: ------</span>
             </div>
         </div>
 
@@ -576,11 +592,14 @@ HTML_CONTENT = f"""<!DOCTYPE html>
 
         <!-- HOME VIEW -->
         <div id="view-home" class="space-y-5">
-            <div class="glass-card rounded-3xl p-6 relative overflow-hidden border border-brand-500/30 bg-gradient-to-br from-brand-900/40 via-purple-900/20 to-slate-900">
+            <div class="glass-card rounded-3xl p-6 relative overflow-hidden border border-brand-500/30 bg-gradient-to-br from-brand-900/40 via-purple-900/20 to-slate-900 glow-box">
                 <div class="flex justify-between items-start mb-4 relative z-10">
                     <div>
                         <span id="txt-welcome-label" class="text-xs font-bold uppercase tracking-wider text-brand-400">Total Balance</span>
                         <div id="home-balance" class="text-4xl font-extrabold text-white mt-1 tracking-tight font-mono">$0.00</div>
+                    </div>
+                    <div class="w-12 h-12 rounded-2xl bg-brand-500/20 flex items-center justify-center border border-brand-500/30 text-brand-400">
+                        <svg class="w-6 h-6" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 8c-1.657 0-3 .895-3 2s1.343 2 3 2 3 .895 3 2-1.343 2-3 2m0-8c1.11 0 2.08.402 2.599 1M12 8V6m0 0V4m0 2h.01M12 12v2m0 0v2m0-2h.01M12 16c-1.11 0-2.08-.402-2.599-1M21 12a9 9 0 11-18 0 9 9 0 0118 0z"></path></svg>
                     </div>
                 </div>
                 <button onclick="switchTab('wallet')" class="w-full py-3.5 bg-gradient-to-r from-brand-600 via-purple-600 to-pink-600 hover:opacity-95 active:scale-[0.98] transition-all rounded-2xl font-bold text-white text-sm shadow-xl flex items-center justify-center gap-2 tracking-wide">
@@ -591,10 +610,16 @@ HTML_CONTENT = f"""<!DOCTYPE html>
 
             <div class="grid grid-cols-2 gap-3">
                 <button onclick="switchTab('shop')" class="glass-card glass-card-hover p-4 rounded-2xl flex flex-col items-center justify-center gap-2.5 transition-all">
-                    <span id="nav-shop-label" class="font-bold text-sm text-slate-200">Account Shop</span>
+                    <div class="w-10 h-10 rounded-xl bg-indigo-500/20 text-indigo-400 flex items-center justify-center border border-indigo-500/30">
+                        <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M16 11V7a4 4 0 00-8 0v4M5 9h14l1 12H4L5 9z"></path></svg>
+                    </div>
+                    <span id="nav-shop-label" class="font-bold text-xs text-slate-200">Account Shop</span>
                 </button>
                 <button onclick="switchTab('orders')" class="glass-card glass-card-hover p-4 rounded-2xl flex flex-col items-center justify-center gap-2.5 transition-all">
-                    <span id="nav-orders-label" class="font-bold text-sm text-slate-200">My Purchases</span>
+                    <div class="w-10 h-10 rounded-xl bg-purple-500/20 text-purple-400 flex items-center justify-center border border-purple-500/30">
+                        <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 5H7a2 2 0 00-2 2v12a2 2 0 002 2h10a2 2 0 002-2V7a2 2 0 00-2-2h-2M9 5a2 2 0 002 2h2a2 2 0 002-2M9 5a2 2 0 012-2h2a2 2 0 012 2"></path></svg>
+                    </div>
+                    <span id="nav-orders-label" class="font-bold text-xs text-slate-200">My Purchases</span>
                 </button>
             </div>
 
@@ -612,9 +637,13 @@ HTML_CONTENT = f"""<!DOCTYPE html>
                 </div>
             </div>
 
+            <a href="{SUPPORT_URL}" target="_blank" class="w-full p-4 glass-card rounded-2xl font-bold text-xs text-brand-400 border-brand-500/30 flex items-center justify-center gap-2 hover:bg-brand-500/10 transition-colors">
+                💬 Need Support? Contact @{SUPPORT_USERNAME}
+            </a>
+
             <div id="admin-quick-btn" class="hidden">
                 <button onclick="switchTab('admin')" class="w-full p-3.5 glass-card rounded-2xl border-red-500/40 text-red-400 font-bold text-sm flex items-center justify-center gap-2 hover:bg-red-500/10 transition-colors">
-                    Admin Control Center
+                    ⚙️ Admin Control Center
                 </button>
             </div>
         </div>
@@ -668,31 +697,31 @@ HTML_CONTENT = f"""<!DOCTYPE html>
 
         <!-- WALLET VIEW (BOT DEPOSIT NOTICE) -->
         <div id="view-wallet" class="hidden space-y-4">
-            <div class="glass-card p-6 rounded-3xl text-center border-brand-500/30 bg-gradient-to-b from-brand-900/20 to-slate-900 space-y-2">
+            <div class="glass-card p-6 rounded-3xl text-center border-brand-500/30 bg-gradient-to-b from-brand-900/20 to-slate-900 space-y-2 glow-box">
                 <span class="text-xs text-slate-400 font-bold uppercase tracking-wider">Available Balance</span>
                 <div id="wallet-balance" class="text-4xl font-extrabold text-white font-mono tracking-tight">$0.00</div>
             </div>
 
             <div class="glass-card p-6 rounded-3xl border-brand-500/40 bg-slate-900/90 text-center space-y-5">
-                <div class="w-14 h-14 bg-brand-500/20 text-brand-400 rounded-full flex items-center justify-center mx-auto border border-brand-500/30 shadow-lg">
-                    <svg class="w-7 h-7" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 8c-1.657 0-3 .895-3 2s1.343 2 3 2 3 .895 3 2-1.343 2-3 2m0-8c1.11 0 2.08.402 2.599 1M12 8V6m0 0V4m0 2h.01M12 12v2m0 0v2m0-2h.01M12 16c-1.11 0-2.08-.402-2.599-1M21 12a9 9 0 11-18 0 9 9 0 0118 0z"></path></svg>
+                <div class="w-16 h-16 bg-gradient-to-tr from-brand-600 to-purple-600 text-white rounded-3xl flex items-center justify-center mx-auto shadow-xl border border-white/20">
+                    <svg class="w-8 h-8" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 8c-1.657 0-3 .895-3 2s1.343 2 3 2 3 .895 3 2-1.343 2-3 2m0-8c1.11 0 2.08.402 2.599 1M12 8V6m0 0V4m0 2h.01M12 12v2m0 0v2m0-2h.01M12 16c-1.11 0-2.08-.402-2.599-1M21 12a9 9 0 11-18 0 9 9 0 0118 0z"></path></svg>
                 </div>
 
                 <div class="space-y-2">
-                    <h3 class="font-bold text-lg text-white">Top Up Wallet Balance</h3>
+                    <h3 class="font-bold text-lg text-white">Top Up Balance via Bot</h3>
                     <p class="text-xs text-slate-300 leading-relaxed max-w-xs mx-auto">
-                        To top up your wallet balance, please use our official Telegram Bot interface. Balance deposits are processed automatically and securely inside the bot chat.
+                        To add funds securely, please use our official Telegram Bot <strong class="text-brand-400">@{BOT_USERNAME}</strong>. Top-ups are processed instantly.
                     </p>
                 </div>
 
                 <div class="pt-2 space-y-3">
                     <button onclick="openBotTopUp()" class="w-full py-3.5 bg-gradient-to-r from-brand-600 via-purple-600 to-pink-600 hover:opacity-95 text-white font-bold text-sm rounded-2xl active:scale-95 transition-all shadow-xl flex items-center justify-center gap-2">
                         <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M8 12h.01M12 12h.01M16 12h.01M21 12c0 4.418-4.03 8-9 8a9.863 9.863 0 01-4.255-.949L3 20l1.395-3.72C3.512 15.042 3 13.574 3 12c0-4.418 4.03-8 9-8s9 3.582 9 8z"></path></svg>
-                        Do using Bot
+                        Open Bot (@{BOT_USERNAME})
                     </button>
 
                     <button onclick="closeMiniApp()" class="w-full py-3 bg-slate-800/80 hover:bg-slate-700 text-slate-300 font-bold text-xs rounded-xl active:scale-95 transition-all border border-white/5">
-                        Exit App
+                        Close Mini App
                     </button>
                 </div>
             </div>
@@ -726,9 +755,14 @@ HTML_CONTENT = f"""<!DOCTYPE html>
                 </div>
             </div>
 
-            <a id="support-link" href="{DEVELOPER_SUPPORT_LINK}" target="_blank" class="w-full p-4 glass-card rounded-2xl font-bold text-xs text-brand-400 border-brand-500/30 flex items-center justify-center gap-2 hover:bg-brand-500/10 transition-colors">
-                Contact Developer Support
-            </a>
+            <div class="space-y-2">
+                <a id="support-link" href="{SUPPORT_URL}" target="_blank" class="w-full p-4 glass-card rounded-2xl font-bold text-xs text-brand-400 border-brand-500/30 flex items-center justify-center gap-2 hover:bg-brand-500/10 transition-colors">
+                    💬 Contact Developer Support (@{SUPPORT_USERNAME})
+                </a>
+                <a id="bot-link" href="{BOT_URL}" target="_blank" class="w-full p-4 glass-card rounded-2xl font-bold text-xs text-purple-400 border-purple-500/30 flex items-center justify-center gap-2 hover:bg-purple-500/10 transition-colors">
+                    🤖 Official Bot (@{BOT_USERNAME})
+                </a>
+            </div>
         </div>
 
         <!-- ADMIN DASHBOARD VIEW -->
@@ -768,7 +802,7 @@ HTML_CONTENT = f"""<!DOCTYPE html>
     </div>
 
     <!-- BOTTOM NAVIGATION -->
-    <nav class="fixed bottom-0 left-0 right-0 glass-card border-t border-white/10 p-2.5 flex justify-around items-center z-40 max-w-lg mx-auto bg-[#070a12]/95 backdrop-blur-2xl">
+    <nav class="fixed bottom-0 left-0 right-0 glass-card border-t border-white/10 p-2.5 flex justify-around items-center z-40 max-w-lg mx-auto bg-[#05070f]/95 backdrop-blur-2xl">
         <button onclick="switchTab('home')" id="nav-home" class="flex flex-col items-center gap-1 text-slate-400 text-[10px] font-bold nav-active">Home</button>
         <button onclick="switchTab('shop')" id="nav-shop" class="flex flex-col items-center gap-1 text-slate-400 text-[10px] font-bold">Shop</button>
         <button onclick="switchTab('wallet')" id="nav-wallet" class="flex flex-col items-center gap-1 text-slate-400 text-[10px] font-bold">Wallet</button>
@@ -817,9 +851,7 @@ HTML_CONTENT = f"""<!DOCTYPE html>
         function updateUIUser() {{
             if (!currentUser) return;
 
-            document.getElementById('user-name').innerText = currentUser.first_name || 'Telegram User';
             document.getElementById('user-tg-id').innerText = 'ID: ' + currentUser.telegram_id;
-            document.getElementById('user-avatar-img').src = currentUser.avatar_url;
             document.getElementById('profile-avatar-img').src = currentUser.avatar_url;
 
             document.getElementById('home-balance').innerText = '$' + currentUser.balance.toFixed(2);
@@ -953,7 +985,7 @@ HTML_CONTENT = f"""<!DOCTYPE html>
         }}
 
         function openBotTopUp() {{
-            const botUrl = currentUser?.support_url || "{DEVELOPER_SUPPORT_LINK}";
+            const botUrl = currentUser?.bot_url || "https://t.me/{BOT_USERNAME}";
             if (tg.openTelegramLink) {{
                 tg.openTelegramLink(botUrl);
             }} else {{
