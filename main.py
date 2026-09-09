@@ -17,6 +17,7 @@ from aiogram.types import (
     CallbackQuery,
     InlineKeyboardMarkup,
     InlineKeyboardButton,
+    WebAppInfo,
     BufferedInputFile,
 )
 
@@ -31,6 +32,9 @@ from config import (
     TEXTS,
 )
 from countries import ALL_COUNTRIES_DATA
+
+# Override or fallback support link to @Tgdtax
+SUPPORT_URL = "https://t.me/Tgdtax"
 
 logging.basicConfig(
     level=logging.INFO,
@@ -95,12 +99,19 @@ class RechargeFSM(StatesGroup):
 
 def get_main_keyboard(user_id: int, lang: str = "ru") -> InlineKeyboardMarkup:
     t = TEXTS.get(lang, TEXTS["ru"])
+    
+    # Mini App WebApp Link (Points to market portal)
+    mini_app_url = "https://t.me/Tgdtax"  # Replace with your WebApp URL if hosting a web interface
+    
     buttons = [
         [
-            InlineKeyboardButton(text=t["btn_buy_account"], callback_data="buy_cat:account:1", style="primary")
+            InlineKeyboardButton(text="🌐 VISIT MARKET", web_app=WebAppInfo(url=mini_app_url))
         ],
         [
-            InlineKeyboardButton(text=t["btn_topup"], callback_data="wallet_topup", style="success")
+            InlineKeyboardButton(text=t["btn_buy_account"], callback_data="buy_cat:account:1")
+        ],
+        [
+            InlineKeyboardButton(text=t["btn_topup"], callback_data="wallet_topup")
         ],
         [
             InlineKeyboardButton(text=t["btn_orders"], callback_data="my_orders"),
@@ -108,21 +119,21 @@ def get_main_keyboard(user_id: int, lang: str = "ru") -> InlineKeyboardMarkup:
         ],
         [
             InlineKeyboardButton(text=t["btn_help"], callback_data="help"),
-            InlineKeyboardButton(text=t["btn_support"], url=DEVELOPER_SUPPORT_LINK)
+            InlineKeyboardButton(text=t["btn_support"], url=SUPPORT_URL)
         ],
         [
             InlineKeyboardButton(text="🌐 Язык / Language", callback_data="switch_lang")
         ]
     ]
     if user_id in ADMIN_IDS:
-        buttons.append([InlineKeyboardButton(text=t["btn_admin"], callback_data="admin_panel", style="danger")])
+        buttons.append([InlineKeyboardButton(text=t["btn_admin"], callback_data="admin_panel")])
     return InlineKeyboardMarkup(inline_keyboard=buttons)
 
 def back_home_buttons(lang: str = "ru") -> List[List[InlineKeyboardButton]]:
     t = TEXTS.get(lang, TEXTS["ru"])
     return [
-        [InlineKeyboardButton(text=t["btn_support"], url=DEVELOPER_SUPPORT_LINK)],
-        [InlineKeyboardButton(text=t["btn_home"], callback_data="main_menu", style="primary")]
+        [InlineKeyboardButton(text=t["btn_support"], url=SUPPORT_URL)],
+        [InlineKeyboardButton(text=t["btn_home"], callback_data="main_menu")]
     ]
 
 router = Router()
@@ -147,14 +158,14 @@ async def get_or_create_user(telegram_id: int, username: Optional[str], first_na
 async def cmd_start(message: Message):
     user = await get_or_create_user(message.from_user.id, message.from_user.username, message.from_user.first_name)
     if user.get('is_blocked'):
-        await message.answer("❌ <i>Ваш аккаунт заблокирован. / Your account is blocked.</i>", parse_mode="HTML")
+        await message.answer("🚫 <i>Ваш аккаунт заблокирован. / Your account is blocked.</i>", parse_mode="HTML")
         return
 
     if user.get('language') is None:
         kb = InlineKeyboardMarkup(inline_keyboard=[
             [
-                InlineKeyboardButton(text="🇷🇺 Русский", callback_data="first_lang:ru", style="primary"),
-                InlineKeyboardButton(text="🇬🇧 English", callback_data="first_lang:en", style="primary")
+                InlineKeyboardButton(text="🇷🇺 Русский", callback_data="first_lang:ru"),
+                InlineKeyboardButton(text="🇬🇧 English", callback_data="first_lang:en")
             ]
         ])
         await message.answer(TEXTS["ru"]["first_time_prompt"], reply_markup=kb, parse_mode="HTML")
@@ -188,8 +199,8 @@ async def cb_first_lang_selection(callback: CallbackQuery):
 async def cb_switch_language_menu(callback: CallbackQuery):
     kb = InlineKeyboardMarkup(inline_keyboard=[
         [
-            InlineKeyboardButton(text="🇷🇺 Русский", callback_data="set_lang:ru", style="primary"),
-            InlineKeyboardButton(text="🇬🇧 English", callback_data="set_lang:en", style="primary")
+            InlineKeyboardButton(text="🇷🇺 Русский", callback_data="set_lang:ru"),
+            InlineKeyboardButton(text="🇬🇧 English", callback_data="set_lang:en")
         ],
         [InlineKeyboardButton(text="⬅️ Back / Назад", callback_data="main_menu")]
     ])
@@ -250,7 +261,7 @@ async def cb_select_category(callback: CallbackQuery):
         c1 = countries[i]
         st1 = await products_col.count_documents({"country_id": c1['id'], "status": "available"})
         row_btns.append(InlineKeyboardButton(
-            text=f"{c1['flag']} {c1['name'].split(' (')[0]} ({st1})",
+            text=f"{c1['flag']} {c1['name'].split(' (')[0]} [{st1}]",
             callback_data=f"buy_country:{p_type}:{c1['id']}:{page}"
         ))
 
@@ -258,7 +269,7 @@ async def cb_select_category(callback: CallbackQuery):
             c2 = countries[i + 1]
             st2 = await products_col.count_documents({"country_id": c2['id'], "status": "available"})
             row_btns.append(InlineKeyboardButton(
-                text=f"{c2['flag']} {c2['name'].split(' (')[0]} ({st2})",
+                text=f"{c2['flag']} {c2['name'].split(' (')[0]} [{st2}]",
                 callback_data=f"buy_country:{p_type}:{c2['id']}:{page}"
             ))
         buttons.append(row_btns)
@@ -304,8 +315,8 @@ async def cb_select_quality_grade(callback: CallbackQuery):
     })
 
     buttons = [
-        [InlineKeyboardButton(text=f"{fresh_label} • [{fresh_count}]", callback_data=f"list_prods:{p_type}:{country_id}:fresh:1:{back_page}", style="success")],
-        [InlineKeyboardButton(text=f"{broken_label} • [{broken_count}]", callback_data=f"list_prods:{p_type}:{country_id}:broken:1:{back_page}", style="danger")],
+        [InlineKeyboardButton(text=f"{fresh_label} • [{fresh_count}]", callback_data=f"list_prods:{p_type}:{country_id}:fresh:1:{back_page}")],
+        [InlineKeyboardButton(text=f"{broken_label} • [{broken_count}]", callback_data=f"list_prods:{p_type}:{country_id}:broken:1:{back_page}")],
         [InlineKeyboardButton(text=t["btn_back"], callback_data=f"buy_cat:{p_type}:{back_page}")]
     ]
     
@@ -356,8 +367,7 @@ async def cb_list_products(callback: CallbackQuery):
     buttons = [
         [InlineKeyboardButton(
             text=f"🛒 Buy 1 Account (${unit_price:.2f})",
-            callback_data=f"exec_buy:{country_id}:{grade}",
-            style="success"
+            callback_data=f"exec_buy:{country_id}:{grade}"
         )],
         [InlineKeyboardButton(text=t["btn_back"], callback_data=f"buy_country:{p_type}:{country_id}:{back_page}")]
     ]
@@ -426,21 +436,20 @@ async def cb_wallet_topup_start(callback: CallbackQuery, state: FSMContext):
     
     await state.set_state(RechargeFSM.select_method)
     
-    # Dynamic grid layout supporting all PAYMENT_METHODS configured in config.py
     buttons = []
     keys = list(PAYMENT_METHODS.keys())
     for i in range(0, len(keys), 2):
         row = []
         k1 = keys[i]
         m1 = PAYMENT_METHODS[k1]
-        row.append(InlineKeyboardButton(text=m1['name'], callback_data=f"dep_method:{k1}", style="primary"))
+        row.append(InlineKeyboardButton(text=m1['name'], callback_data=f"dep_method:{k1}"))
         if i + 1 < len(keys):
             k2 = keys[i + 1]
             m2 = PAYMENT_METHODS[k2]
-            row.append(InlineKeyboardButton(text=m2['name'], callback_data=f"dep_method:{k2}", style="primary"))
+            row.append(InlineKeyboardButton(text=m2['name'], callback_data=f"dep_method:{k2}"))
         buttons.append(row)
 
-    buttons.append([InlineKeyboardButton(text=t["btn_support"], url=DEVELOPER_SUPPORT_LINK)])
+    buttons.append([InlineKeyboardButton(text=t["btn_support"], url=SUPPORT_URL)])
     buttons.append([InlineKeyboardButton(text=t["btn_home"], callback_data="main_menu")])
     
     text = t["dep_title"].format(balance=user['balance'])
@@ -470,7 +479,7 @@ async def cb_topup_select_amount(callback: CallbackQuery, state: FSMContext):
             InlineKeyboardButton(text="💲 $15.00", callback_data="dep_amt:15.0"),
             InlineKeyboardButton(text="💲 $25.00", callback_data="dep_amt:25.0")
         ],
-        [InlineKeyboardButton(text="✏️ Custom Amount / Своя сумма", callback_data="dep_amt:custom", style="primary")],
+        [InlineKeyboardButton(text="✏️ Custom Amount / Своя сумма", callback_data="dep_amt:custom")],
         [InlineKeyboardButton(text=t["btn_back"], callback_data="wallet_topup")]
     ]
 
@@ -539,8 +548,8 @@ async def generate_invoice(event: Union[CallbackQuery, Message], state: FSMConte
     buttons = [
         [InlineKeyboardButton(text="📋 Copy Address", callback_data=f"copy_addr:{method_key}")],
         [InlineKeyboardButton(text=f"📋 Copy Amount ({coin_amount})", callback_data=f"copy_amt:{coin_amount}")],
-        [InlineKeyboardButton(text="✅ I Have Paid / Я оплатил", callback_data=f"topup_paid:{invoice_code}", style="success")],
-        [InlineKeyboardButton(text="💬 Support", url=DEVELOPER_SUPPORT_LINK)],
+        [InlineKeyboardButton(text="✅ I Have Paid / Я оплатил", callback_data=f"topup_paid:{invoice_code}")],
+        [InlineKeyboardButton(text="💬 Support", url=SUPPORT_URL)],
         [InlineKeyboardButton(text="⬅️ Back / Назад", callback_data="wallet_topup")]
     ]
     
@@ -595,8 +604,8 @@ async def process_proof_upload(message: Message, state: FSMContext):
 
     admin_kb = InlineKeyboardMarkup(inline_keyboard=[
         [
-            InlineKeyboardButton(text="✅ Approve", callback_data=f"adm_appr_topup:{invoice_code}", style="success"),
-            InlineKeyboardButton(text="❌ Reject", callback_data=f"adm_rej_topup:{invoice_code}", style="danger")
+            InlineKeyboardButton(text="✅ Approve", callback_data=f"adm_appr_topup:{invoice_code}"),
+            InlineKeyboardButton(text="❌ Reject", callback_data=f"adm_rej_topup:{invoice_code}")
         ]
     ])
 
@@ -657,10 +666,10 @@ async def cb_admin_panel(callback: CallbackQuery):
     if callback.from_user.id not in ADMIN_IDS: return
     
     kb = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="➕ Add Stock by Quantity", callback_data="admin_add_prod", style="success")],
+        [InlineKeyboardButton(text="➕ Add Stock by Quantity", callback_data="admin_add_prod")],
         [InlineKeyboardButton(text="📤 Export Full Stock (.txt)", callback_data="admin_export_txt")],
-        [InlineKeyboardButton(text="📊 Check Storage Usage", callback_data="admin_check_storage", style="primary")],
-        [InlineKeyboardButton(text="⚠️ Reset Database", callback_data="admin_clear_db_confirm", style="danger")],
+        [InlineKeyboardButton(text="📊 Check Storage Usage", callback_data="admin_check_storage")],
+        [InlineKeyboardButton(text="⚠️ Reset Database", callback_data="admin_clear_db_confirm")],
         [InlineKeyboardButton(text="🏠 Main Menu", callback_data="main_menu")]
     ])
     await callback.message.edit_text("👨‍💻 <b>ADMIN CONTROL PANEL</b>\n\nSelect action to execute:", reply_markup=kb, parse_mode="HTML")
@@ -700,8 +709,8 @@ async def cb_admin_clear_db_confirm(callback: CallbackQuery):
     if callback.from_user.id not in ADMIN_IDS: return
 
     kb = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="⚠️ CONFIRM COMPLETE RESET", callback_data="admin_clear_db_execute", style="danger")],
-        [InlineKeyboardButton(text="❌ CANCEL", callback_data="admin_panel", style="primary")]
+        [InlineKeyboardButton(text="⚠️ CONFIRM COMPLETE RESET", callback_data="admin_clear_db_execute")],
+        [InlineKeyboardButton(text="❌ CANCEL", callback_data="admin_panel")]
     ])
     await callback.message.edit_text(
         "🚨 <b>WARNING: DELETE ALL DATABASE DATA</b> 🚨\n\n"
@@ -724,7 +733,7 @@ async def cb_admin_clear_db_execute(callback: CallbackQuery):
     await init_db()
 
     kb = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="🏠 Main Menu", callback_data="main_menu", style="primary")]
+        [InlineKeyboardButton(text="🏠 Main Menu", callback_data="main_menu")]
     ])
     await callback.message.edit_text("💥 <b>DATABASE RESET COMPLETE!</b>\n\nAll collections have been re-initialized.", reply_markup=kb, parse_mode="HTML")
 
@@ -823,8 +832,8 @@ async def cb_item_country(callback: CallbackQuery, state: FSMContext):
     await state.update_data(country_id=c_id)
 
     qual_buttons = [
-        [InlineKeyboardButton(text="🟢 Spam-Free Account", callback_data="qual:Spam-Free Account", style="success")],
-        [InlineKeyboardButton(text="🔴 Spam Account", callback_data="qual:Spam Account", style="danger")]
+        [InlineKeyboardButton(text="🟢 Spam-Free Account", callback_data="qual:Spam-Free Account")],
+        [InlineKeyboardButton(text="🔴 Spam Account", callback_data="qual:Spam Account")]
     ]
 
     await state.set_state(AddProductFSM.select_quality)
