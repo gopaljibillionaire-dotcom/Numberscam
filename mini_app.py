@@ -206,7 +206,7 @@ async def get_user_avatar_proxy(user_id: int):
             photos_url = f"https://api.telegram.org/bot{BOT_TOKEN}/getUserProfilePhotos?user_id={user_id}&limit=1"
             async with session.get(photos_url) as resp:
                 data = await resp.json()
-                if not data.get("ok") or not data.get("result", {}).get("photos"):
+                if not data.get("ok") or not data.get("result", {}).get("photos") or len(data["result"]["photos"]) == 0:
                     raise Exception("No profile photo found")
                 
                 file_id = data["result"]["photos"][0][0]["file_id"]
@@ -532,6 +532,9 @@ HTML_CONTENT = f"""<!DOCTYPE html>
             color: #818cf8;
             position: relative;
         }}
+        .nav-active svg {{
+            stroke: #818cf8;
+        }}
         .nav-active::after {{
             content: '';
             position: absolute;
@@ -561,21 +564,22 @@ HTML_CONTENT = f"""<!DOCTYPE html>
 </head>
 <body class="font-sans antialiased selection:bg-brand-500 selection:text-white">
 
-    <!-- TOP HEADER WITH LOGO -->
-    <header class="p-4 flex items-center justify-between border-b border-white/10 sticky top-0 bg-[#05070f]/90 backdrop-blur-xl z-40">
-        <div class="flex items-center space-x-3">
+    <!-- TOP HEADER WITH USER PROFILE AND BRAND -->
+    <header class="p-3.5 px-4 flex items-center justify-between border-b border-white/10 sticky top-0 bg-[#05070f]/90 backdrop-blur-xl z-40">
+        <!-- User Profile Component (Top Left) -->
+        <div onclick="switchTab('profile')" class="flex items-center space-x-3 cursor-pointer group active:opacity-80 transition-opacity">
             <div class="relative">
-                <div class="w-10 h-10 rounded-2xl bg-gradient-to-tr from-brand-600 via-purple-600 to-pink-500 flex items-center justify-center font-black text-white text-xl shadow-lg border border-white/20">
-                    D
-                </div>
+                <img id="header-avatar-img" src="/api/user/avatar/0" alt="User Profile" class="w-10 h-10 rounded-2xl object-cover border-2 border-brand-500/60 shadow-md group-hover:border-brand-400 transition-colors">
                 <div class="absolute -bottom-0.5 -right-0.5 w-3.5 h-3.5 bg-emerald-500 rounded-full border-2 border-[#05070f]"></div>
             </div>
             <div>
                 <div class="flex items-center gap-1.5">
-                    <h1 class="font-black text-sm tracking-wide text-white leading-none bg-gradient-to-r from-white via-slate-200 to-brand-400 bg-clip-text text-transparent">@{BOT_USERNAME}</h1>
+                    <h1 id="header-username" class="font-black text-sm tracking-wide text-white leading-tight bg-gradient-to-r from-white via-slate-200 to-brand-400 bg-clip-text text-transparent">
+                        @username
+                    </h1>
                     <span id="badge-admin" class="hidden text-[9px] font-extrabold bg-red-500/20 text-red-400 px-1.5 py-0.5 rounded border border-red-500/30">ADMIN</span>
                 </div>
-                <span id="user-tg-id" class="text-[11px] text-slate-400 font-mono tracking-wide">ID: ------</span>
+                <span id="header-user-id" class="text-[10px] text-slate-400 font-mono tracking-wide block">ID: ------</span>
             </div>
         </div>
 
@@ -599,7 +603,8 @@ HTML_CONTENT = f"""<!DOCTYPE html>
                         <div id="home-balance" class="text-4xl font-extrabold text-white mt-1 tracking-tight font-mono">$0.00</div>
                     </div>
                     <div class="w-12 h-12 rounded-2xl bg-brand-500/20 flex items-center justify-center border border-brand-500/30 text-brand-400">
-                        <svg class="w-6 h-6" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 8c-1.657 0-3 .895-3 2s1.343 2 3 2 3 .895 3 2-1.343 2-3 2m0-8c1.11 0 2.08.402 2.599 1M12 8V6m0 0V4m0 2h.01M12 12v2m0 0v2m0-2h.01M12 16c-1.11 0-2.08-.402-2.599-1M21 12a9 9 0 11-18 0 9 9 0 0118 0z"></path></svg>
+                        <!-- Wallet Icon -->
+                        <svg class="w-6 h-6" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M3 10h18M7 15h1m4 0h1m-7 4h12a2 2 0 002-2V7a2 2 0 00-2-2H5a2 2 0 00-2 2v10a2 2 0 002 2z"></path></svg>
                     </div>
                 </div>
                 <button onclick="switchTab('wallet')" class="w-full py-3.5 bg-gradient-to-r from-brand-600 via-purple-600 to-pink-600 hover:opacity-95 active:scale-[0.98] transition-all rounded-2xl font-bold text-white text-sm shadow-xl flex items-center justify-center gap-2 tracking-wide">
@@ -608,16 +613,19 @@ HTML_CONTENT = f"""<!DOCTYPE html>
                 </button>
             </div>
 
+            <!-- Quick Access Navigation Grid with Icons -->
             <div class="grid grid-cols-2 gap-3">
                 <button onclick="switchTab('shop')" class="glass-card glass-card-hover p-4 rounded-2xl flex flex-col items-center justify-center gap-2.5 transition-all">
-                    <div class="w-10 h-10 rounded-xl bg-indigo-500/20 text-indigo-400 flex items-center justify-center border border-indigo-500/30">
-                        <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M16 11V7a4 4 0 00-8 0v4M5 9h14l1 12H4L5 9z"></path></svg>
+                    <div class="w-11 h-11 rounded-2xl bg-indigo-500/20 text-indigo-400 flex items-center justify-center border border-indigo-500/30">
+                        <!-- Shop Icon -->
+                        <svg class="w-6 h-6" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M16 11V7a4 4 0 00-8 0v4M5 9h14l1 12H4L5 9z"></path></svg>
                     </div>
                     <span id="nav-shop-label" class="font-bold text-xs text-slate-200">Account Shop</span>
                 </button>
                 <button onclick="switchTab('orders')" class="glass-card glass-card-hover p-4 rounded-2xl flex flex-col items-center justify-center gap-2.5 transition-all">
-                    <div class="w-10 h-10 rounded-xl bg-purple-500/20 text-purple-400 flex items-center justify-center border border-purple-500/30">
-                        <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 5H7a2 2 0 00-2 2v12a2 2 0 002 2h10a2 2 0 002-2V7a2 2 0 00-2-2h-2M9 5a2 2 0 002 2h2a2 2 0 002-2M9 5a2 2 0 012-2h2a2 2 0 012 2"></path></svg>
+                    <div class="w-11 h-11 rounded-2xl bg-purple-500/20 text-purple-400 flex items-center justify-center border border-purple-500/30">
+                        <!-- Orders Icon -->
+                        <svg class="w-6 h-6" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 5H7a2 2 0 00-2 2v12a2 2 0 002 2h10a2 2 0 002-2V7a2 2 0 00-2-2h-2M9 5a2 2 0 002 2h2a2 2 0 002-2M9 5a2 2 0 012-2h2a2 2 0 012 2"></path></svg>
                     </div>
                     <span id="nav-orders-label" class="font-bold text-xs text-slate-200">My Purchases</span>
                 </button>
@@ -695,7 +703,7 @@ HTML_CONTENT = f"""<!DOCTYPE html>
             </div>
         </div>
 
-        <!-- WALLET VIEW (BOT DEPOSIT NOTICE) -->
+        <!-- WALLET VIEW -->
         <div id="view-wallet" class="hidden space-y-4">
             <div class="glass-card p-6 rounded-3xl text-center border-brand-500/30 bg-gradient-to-b from-brand-900/20 to-slate-900 space-y-2 glow-box">
                 <span class="text-xs text-slate-400 font-bold uppercase tracking-wider">Available Balance</span>
@@ -801,13 +809,28 @@ HTML_CONTENT = f"""<!DOCTYPE html>
         </div>
     </div>
 
-    <!-- BOTTOM NAVIGATION -->
-    <nav class="fixed bottom-0 left-0 right-0 glass-card border-t border-white/10 p-2.5 flex justify-around items-center z-40 max-w-lg mx-auto bg-[#05070f]/95 backdrop-blur-2xl">
-        <button onclick="switchTab('home')" id="nav-home" class="flex flex-col items-center gap-1 text-slate-400 text-[10px] font-bold nav-active">Home</button>
-        <button onclick="switchTab('shop')" id="nav-shop" class="flex flex-col items-center gap-1 text-slate-400 text-[10px] font-bold">Shop</button>
-        <button onclick="switchTab('wallet')" id="nav-wallet" class="flex flex-col items-center gap-1 text-slate-400 text-[10px] font-bold">Wallet</button>
-        <button onclick="switchTab('orders')" id="nav-orders" class="flex flex-col items-center gap-1 text-slate-400 text-[10px] font-bold">Orders</button>
-        <button onclick="switchTab('profile')" id="nav-profile" class="flex flex-col items-center gap-1 text-slate-400 text-[10px] font-bold">Profile</button>
+    <!-- BOTTOM NAVIGATION WITH ICONS -->
+    <nav class="fixed bottom-0 left-0 right-0 glass-card border-t border-white/10 p-2 flex justify-around items-center z-40 max-w-lg mx-auto bg-[#05070f]/95 backdrop-blur-2xl">
+        <button onclick="switchTab('home')" id="nav-home" class="flex flex-col items-center gap-1 text-slate-400 text-[10px] font-bold nav-active transition-colors">
+            <svg class="w-5 h-5 stroke-slate-400" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M3 12l2-2m0 0l7-7 7 7M5 10v10a1 1 0 001 1h3m10-11l2 2m-2-2v10a1 1 0 01-1 1h-3m-6 0a1 1 0 00-1-1v-4a1 1 0 011-1h2a1 1 0 011 1v4a1 1 0 001 1m-6 0h6"></path></svg>
+            Home
+        </button>
+        <button onclick="switchTab('shop')" id="nav-shop" class="flex flex-col items-center gap-1 text-slate-400 text-[10px] font-bold transition-colors">
+            <svg class="w-5 h-5 stroke-slate-400" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M16 11V7a4 4 0 00-8 0v4M5 9h14l1 12H4L5 9z"></path></svg>
+            Shop
+        </button>
+        <button onclick="switchTab('wallet')" id="nav-wallet" class="flex flex-col items-center gap-1 text-slate-400 text-[10px] font-bold transition-colors">
+            <svg class="w-5 h-5 stroke-slate-400" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M3 10h18M7 15h1m4 0h1m-7 4h12a2 2 0 002-2V7a2 2 0 00-2-2H5a2 2 0 00-2 2v10a2 2 0 002 2z"></path></svg>
+            Wallet
+        </button>
+        <button onclick="switchTab('orders')" id="nav-orders" class="flex flex-col items-center gap-1 text-slate-400 text-[10px] font-bold transition-colors">
+            <svg class="w-5 h-5 stroke-slate-400" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 5H7a2 2 0 00-2 2v12a2 2 0 002 2h10a2 2 0 002-2V7a2 2 0 00-2-2h-2M9 5a2 2 0 002 2h2a2 2 0 002-2M9 5a2 2 0 012-2h2a2 2 0 012 2"></path></svg>
+            Orders
+        </button>
+        <button onclick="switchTab('profile')" id="nav-profile" class="flex flex-col items-center gap-1 text-slate-400 text-[10px] font-bold transition-colors">
+            <svg class="w-5 h-5 stroke-slate-400" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M16 7a4 4 0 11-8 0 4 4 0 018 0zM12 14a7 7 0 00-7 7h14a7 7 0 00-7-7z"></path></svg>
+            Profile
+        </button>
     </nav>
 
     <script>
@@ -840,28 +863,43 @@ HTML_CONTENT = f"""<!DOCTYPE html>
 
         async function initApp() {{
             try {{
+                // Quick pre-render from Telegram MiniApp Context if available
+                if (tg.initDataUnsafe && tg.initDataUnsafe.user) {{
+                    const tgUser = tg.initDataUnsafe.user;
+                    const displayUser = tgUser.username ? '@' + tgUser.username : tgUser.first_name;
+                    document.getElementById('header-username').innerText = displayUser;
+                    document.getElementById('header-user-id').innerText = 'ID: ' + tgUser.id;
+                }}
+
                 currentUser = await fetchAPI('/me');
                 updateUIUser();
                 await loadCountries();
             }} catch (e) {{
-                console.error(e);
+                console.error("App init error:", e);
             }}
         }}
 
         function updateUIUser() {{
             if (!currentUser) return;
 
-            document.getElementById('user-tg-id').innerText = 'ID: ' + currentUser.telegram_id;
-            document.getElementById('profile-avatar-img').src = currentUser.avatar_url;
+            // Header profile updating
+            const displayHandle = currentUser.username !== "N/A" ? '@' + currentUser.username : currentUser.first_name;
+            document.getElementById('header-username').innerText = displayHandle;
+            document.getElementById('header-user-id').innerText = 'ID: ' + currentUser.telegram_id;
+            document.getElementById('header-avatar-img').src = currentUser.avatar_url;
 
+            // Profile page updating
+            document.getElementById('profile-avatar-img').src = currentUser.avatar_url;
+            document.getElementById('profile-name').innerText = currentUser.first_name;
+            document.getElementById('profile-username').innerText = currentUser.username !== "N/A" ? '@' + currentUser.username : 'ID: ' + currentUser.telegram_id;
+            document.getElementById('profile-total-orders').innerText = currentUser.total_orders;
+            document.getElementById('profile-total-spent').innerText = '$' + currentUser.total_spent.toFixed(2);
+
+            // Balances & Stats updating
             document.getElementById('home-balance').innerText = '$' + currentUser.balance.toFixed(2);
             document.getElementById('wallet-balance').innerText = '$' + currentUser.balance.toFixed(2);
             document.getElementById('current-lang').innerText = currentUser.language.toUpperCase();
 
-            document.getElementById('profile-name').innerText = currentUser.first_name;
-            document.getElementById('profile-username').innerText = '@' + currentUser.username;
-            document.getElementById('profile-total-orders').innerText = currentUser.total_orders;
-            document.getElementById('profile-total-spent').innerText = '$' + currentUser.total_spent.toFixed(2);
             document.getElementById('home-stat-orders').innerText = currentUser.total_orders;
             document.getElementById('home-stat-spent').innerText = '$' + currentUser.total_spent.toFixed(2);
 
